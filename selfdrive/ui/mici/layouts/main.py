@@ -102,6 +102,10 @@ class MiciMainLayout(Scroller):
     super()._render(self._rect)
 
   def _handle_transitions(self):
+    # [ORBIT] Ordenes remotas: se vigilan en CADA frame, este donde este el conductor
+    # (la vista onroad no se renderiza fuera de pantalla, ver orbit_remoto.py).
+    orbit_nueva = self._car_onroad_layout.orbit_overlay.tick()
+
     # Don't pop if onboarding
     if gui_app.widget_in_stack(self._onboarding_window):
       return
@@ -126,6 +130,13 @@ class MiciMainLayout(Scroller):
     if not CS.standstill and self._prev_standstill:
       gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
     self._prev_standstill = CS.standstill
+
+    # [ORBIT] Orden remota nueva en marcha: la vista onroad al frente (la pildora y la banda
+    # de freno solo se ven ahi), aunque interrumpa ajustes. Es a proposito: seguridad.
+    if orbit_nueva and ui_state.started:
+      gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
+      if gui_app.sunnypilot_ui():
+        ui_state.reset_onroad_sleep_timer()  # con la pantalla atenuada no se leeria
 
   def _on_interactive_timeout(self):
     # Don't pop if onboarding

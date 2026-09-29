@@ -4,7 +4,11 @@ import ast
 import pathlib
 
 ONROAD = pathlib.Path(__file__).resolve().parents[1] / 'sunnypilot' / 'onroad'
-FICHEROS = ['orbit_command_overlay.py', 'orbit_follow_coach.py', 'orbit_hardbrake_overlay.py']
+MICI = ONROAD.parent / 'mici' / 'onroad'
+FICHEROS = [ONROAD / 'orbit_command_overlay.py', ONROAD / 'orbit_follow_coach.py', ONROAD / 'orbit_hardbrake_overlay.py',
+            MICI / 'orbit_overlays.py']
+# El vigilante de mici no dibuja (no hay tokens que exigirle), pero tampoco puede animar
+VIGILANTES = [MICI / 'orbit_remoto.py']
 PROHIBIDOS = {'orbit_fx', 'orbit_duplex', 'orbit_icons'}
 
 
@@ -18,11 +22,11 @@ def _modulos(arbol):
 
 
 def test_onroad_sin_animacion_y_con_tokens():
-  for nombre in FICHEROS:
-    texto = (ONROAD / nombre).read_text()
+  for fichero in FICHEROS + VIGILANTES:
+    nombre, texto = fichero.name, fichero.read_text()
     mods = list(_modulos(ast.parse(texto)))
     assert not [m for m in mods if any(p in m for p in PROHIBIDOS)], nombre
-    assert any('orbit_theme' in m for m in mods), f'{nombre} no usa orbit_theme'
+    assert fichero in VIGILANTES or any('orbit_theme' in m for m in mods), f'{nombre} no usa orbit_theme'
     # Sin colores sueltos (solo tokens de orbit_theme) y sin `math` (trigonometria
     # de animacion): estos overlays son latches, no dibujan movimiento nuevo.
     assert 'rl.Color(' not in texto, f'{nombre} usa un literal rl.Color(...) en vez de un token'

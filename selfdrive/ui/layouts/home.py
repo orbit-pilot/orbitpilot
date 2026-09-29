@@ -12,7 +12,9 @@ from cereal import log
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.offroad_alerts import UpdateAlert, OffroadAlert
+from openpilot.selfdrive.ui.widgets.orbit_mando import PARAM_OWNER_ROLE, rol_etiqueta
 from openpilot.selfdrive.ui.widgets.orbit_server import ServerMonitor, read_broker
+from openpilot.system.hardware import HARDWARE
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos, FONT_SCALE
 from openpilot.system.ui.lib.multilang import tr, trn
@@ -59,6 +61,9 @@ PILL_FONT_SIZE = 30
 DRAGO_LOGO_H = 72
 DRAGO_ASPECT = 469 / 640   # source logo-drago.png is portrait
 POWERED_SIZE = 28
+
+# Modelo comercial por HARDWARE.get_device_type(); cualquier otro valor se ensena tal cual.
+MODELOS = {"tici": "comma 3", "tizi": "comma 3X", "mici": "comma 4", "pc": "PC"}
 
 # Card grid: row 1 = live status (SERVIDOR / ENLACE / DISPOSITIVO),
 # row 2 = info strip (SISTEMA / ACTUALIZACION / RED)
@@ -158,6 +163,7 @@ class HomeLayout(Widget):
     # Cached param reads — fast refresh (FAST_REFRESH_INTERVAL)
     self._claimed = False
     self._owner = ""
+    self._owner_role = ""
     self._connected = False
     self._dongle = ""
     self._orbit_last_publish = 0.0
@@ -176,6 +182,8 @@ class HomeLayout(Widget):
 
     # Live reachability of the Orbit server (background TCP+HTTP probe) + tappable hitboxes.
     self._server = ServerMonitor()
+    tipo = HARDWARE.get_device_type()
+    self._modelo = MODELOS.get(tipo, tipo)
     self._card_rects: dict[str, rl.Rectangle] = {}
     self._pill_rect = rl.Rectangle(0, 0, 0, 0)
 
@@ -397,9 +405,9 @@ class HomeLayout(Widget):
        # a tocar, no un enlace activo, así que usa tinta/borde neutros.
        "Enlazado" if claimed else "Sin enlazar", COMMANDS if claimed else INK,
        (f"propietario: {self._owner}" if self._owner else "cuenta ORBIT activa") if claimed else "escanea el QR con la app",
-       "dispositivo activo" if claimed else "toca para ver el QR", not claimed),
+       (f"rol: {self._owner_role}" if self._owner_role else "dispositivo activo") if claimed else "toca para ver el QR", not claimed),
       ("device", "DISPOSITIVO", dev_val, INK,
-       "comma 3X" if dev_val != "sin registrar" else "conecta el dispositivo",
+       self._modelo if dev_val != "sin registrar" else "conecta el dispositivo",
        "ID de dispositivo" if dev_val != "sin registrar" else "aún sin dongle", False),
     ]
 
@@ -575,6 +583,8 @@ class HomeLayout(Widget):
 
     if claimed:
       text = f"VINCULADO - {self._owner}" if self._owner else "VINCULADO A ORBIT"
+      if self._owner_role:
+        text += f" ({self._owner_role})"
       accent = COMMANDS
     else:
       text = "SIN VINCULAR"
@@ -656,6 +666,7 @@ class HomeLayout(Widget):
       self._connected = bool(self.params.get_bool("OrbitConnected"))
       self._dongle = self.params.get("DongleId") or ""
       self._orbit_last_publish = float(self.params.get("OrbitLastPublish") or 0)
+      self._owner_role = rol_etiqueta(self.params.get(PARAM_OWNER_ROLE)) if self._claimed else ""
     except Exception:
       pass
 
