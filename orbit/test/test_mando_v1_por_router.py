@@ -16,6 +16,7 @@ Lo que se fija:
   * sin GateMonitor vivo (mascara rancia) NO se ejecuta nada.
 """
 import json
+import os
 
 import pytest
 
@@ -23,7 +24,9 @@ from openpilot.orbit.command_gates import GateMonitor
 from openpilot.orbit.command_spec import TOPIC_CAPS, TOPIC_CMD, Gate, Mode, Phase, ahora_epoch_ms
 from openpilot.orbit.command_state import (PARAM_BENCH_ARMED, PARAM_BENCH_EXPIRY, PARAM_MODE,
                                            CommandStateStore)
+from openpilot.orbit import mqtt_comandos
 from openpilot.orbit.mqtt_comandos import MQTTComandos
+from openpilot.system.hardware import HARDWARE
 
 DONGLE = "0123456789abcdef"
 V1 = f"telemetry_config/{DONGLE}"
@@ -508,6 +511,24 @@ def test_las_capacidades_se_publican_retenidas_y_con_qos_1():
   assert "cruise_button" not in d["unsupported"]
   # Y solo ofrece 'cancel': resume/set subirian autoridad y no tienen consumidor.
   assert d["verbs"]["cruise_button"]["args"]["button"]["choices"] == ["cancel"]
+  # Modelo del comma (contrato C1): 'pc' en este PC, tici/tizi/mici en el coche.
+  assert d["device_type"] == HARDWARE.get_device_type()
+  if not os.path.isfile("/TICI"):
+    assert d["device_type"] == "pc"
+
+
+def test_si_no_se_puede_leer_el_modelo_las_capacidades_salen_sin_device_type(monkeypatch):
+  def _roto():
+    raise OSError("devicetree ilegible")
+  mqtt_comandos.tipo_dispositivo.cache_clear()
+  monkeypatch.setattr(HARDWARE, "get_device_type", _roto)
+  try:
+    c = _comandos(verde=True)
+    assert c.maybe_publish_caps(forzar=True)
+    d = json.loads(next(p for t, p, *_ in c.mqttc.publicados if t == TOPIC_CAPS.format(DONGLE)))
+    assert "device_type" not in d and d["v"] == 2
+  finally:
+    mqtt_comandos.tipo_dispositivo.cache_clear()
 
 
 def test_las_capacidades_no_se_republican_si_no_cambian():
@@ -553,6 +574,83 @@ def test_los_topics_de_configuracion_no_pasan_por_el_router_y_no_mueven_nada():
                 "SteerTorqueMode", "orbit_speed_increase", "orbit_speed_decrease"):
     assert clave not in c.params.valores, clave
   assert _acks(c) == []
+
+
+# ------------------------------------------------------------- enrolamiento
+
+class _ParamsContados(_ParamsFalsos):
+  """Cuenta las escrituras de OrbitOwnerRole para fijar 'escribir solo si cambia'."""
+
+  def __init__(self, *a, **k):
+    super().__init__(*a, **k)
+    self.escrituras_rol = 0
+
+  def put(self, key, value, *args, **kwargs):
+    self.escrituras_rol += key == "OrbitOwnerRole"
+    super().put(key, value, *args, **kwargs)
+
+  def remove(self, key):
+    self.escrituras_rol += key == "OrbitOwnerRole" and key in self.valores
+    super().remove(key)
+
+
+def _ack(c, **campos):
+  _entregar(c, f"{V1}/enroll_ack", json.dumps(campos), retain=True)
+
+
+@pytest.mark.parametrize("rol", ["user", "developer", "superadmin"])
+def test_el_enroll_ack_guarda_el_rol_del_dueno(rol):
+  c = _comandos(params=_ParamsContados())
+  _ack(c, claimed=True, user_id=7, user_name="Ana", user_role=rol)
+  v = c.params.valores
+  assert v["OrbitClaimed"] is True and v["OrbitOwner"] == "Ana" and v["OrbitOwnerRole"] == rol
+  # El backend republica el ack retenido en cada reconexion: mismo rol, cero escrituras.
+  _ack(c, claimed=True, user_id=7, user_name="Ana", user_role=rol)
+  assert c.params.escrituras_rol == 1
+
+
+@pytest.mark.parametrize("extra", [{}, {"user_role": "admin"}, {"user_role": None}, {"user_role": ["developer"]}])
+def test_un_rol_ausente_o_desconocido_borra_el_anterior(extra):
+  c = _comandos(params=_ParamsFalsos({"OrbitOwnerRole": "superadmin"}))
+  _ack(c, claimed=True, user_id=7, user_email="a@b.c", **extra)
+  v = c.params.valores
+  assert "OrbitOwnerRole" not in v
+  assert v["OrbitClaimed"] is True and v["OrbitOwner"] == "a@b.c"   # lo de siempre sigue igual
+
+
+def test_claimed_false_borra_el_rol_junto_al_dueno():
+  c = _comandos(params=_ParamsFalsos({"OrbitOwnerRole": "developer", "OrbitOwner": "Ana", "OrbitClaimed": True}))
+  _ack(c, claimed=False)
+  v = c.params.valores
+  assert v["OrbitClaimed"] is False and v["OrbitEnrollRegen"] is True
+  assert "OrbitOwner" not in v and "OrbitOwnerRole" not in v
+
+
+def test_un_enroll_ack_sin_claimed_no_toca_el_rol():
+  c = _comandos(params=_ParamsFalsos({"OrbitOwnerRole": "developer"}))
+  _ack(c, user_role="user")
+  assert c.params.valores["OrbitOwnerRole"] == "developer"
+
+
+def test_el_anuncio_de_enrolamiento_lleva_el_modelo_real():
+  from openpilot.orbit.mqtt_envio_general import MQTTEnvioGeneral
+  e = object.__new__(MQTTEnvioGeneral)
+  e.params = _ParamsFalsos({"Version": "0.0.0"})
+  e.dongle_valido = True
+  e.conectado = True
+  e.DongleID = DONGLE
+  e.mqttc = _ClienteFalso()
+  e._pairing_code = None
+  e._enroll_issued_at = 0.0
+  e._last_enroll = 0.0
+  e.ENROLL_TTL_S = 600
+  e.ENROLL_ANNOUNCE_SECS = 30.0
+  e._maybe_announce_enroll()
+  (topic, payload, _, retain), = e.mqttc.publicados
+  d = json.loads(payload)
+  assert topic == f"telemetry_mqtt/{DONGLE}/enroll" and retain is False
+  assert d["hw"] == HARDWARE.get_device_type() and d["hw"] != "comma3x"
+  assert d["pairing_code"] == e.params.valores["OrbitPairingCode"]
 
 
 # --------------------------------------------------- forma del sobre y del ACK

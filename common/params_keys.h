@@ -382,6 +382,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OrbitConnected", {CLEAR_ON_MANAGER_START, BOOL}},                  // conexión MQTT viva (lo escribe mqtt_envio_general)
     {"OrbitLastPublish", {CLEAR_ON_MANAGER_START, STRING}},              // epoch (s) del último publish de telemetría
     {"OrbitOwner", {PERSISTENT, STRING}},                                // nombre/email del usuario que reclamó el dispositivo
+    {"OrbitOwnerRole", {PERSISTENT, STRING}},                            // rol ORBIT de ese usuario: user | developer | superadmin (llega en el enroll_ack; vacio = desconocido)
     {"OrbitEnrollRegen", {CLEAR_ON_MANAGER_START, BOOL}},                // trigger: la UI pide rotar el código/QR ya
     {"OrbitHealthcheckRequest", {CLEAR_ON_MANAGER_START, STRING}},       // trigger: comando MQTT de diagnóstico remoto pendiente de responder
     {"OrbitCmdResult", {CLEAR_ON_MANAGER_START, STRING}},

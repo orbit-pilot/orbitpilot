@@ -10,6 +10,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.layouts.onboarding import TrainingGuide
 from openpilot.selfdrive.ui.widgets.pairing_dialog import PairingDialog
 from openpilot.selfdrive.ui.widgets.orbit_enroll_dialog import OrbitEnrollDialog
+from openpilot.selfdrive.ui.widgets.orbit_mando import PARAM_OWNER_ROLE, rol_etiqueta
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import multilang, tr, tr_noop
 from openpilot.system.ui.widgets import Widget, DialogResult
@@ -57,7 +58,7 @@ class DeviceLayout(Widget):
                                          button_style=ButtonStyle.PRIMARY)
     self._orbit_enroll_btn.set_visible(lambda: not self._orbit_claimed())
 
-    self._orbit_account_row = text_item(lambda: tr("Cuenta ORBIT"), lambda: self._orbit_owner() or tr("N/A"))
+    self._orbit_account_row = text_item(lambda: tr("Cuenta ORBIT"), self._orbit_account_text)
     self._orbit_account_row.set_visible(self._orbit_claimed)
 
     self._orbit_unlink_btn = button_item(lambda: tr("Desvincular ORBIT"), lambda: tr("QUITAR"),
@@ -107,6 +108,16 @@ class DeviceLayout(Widget):
     except UnknownKeyName:
       return ""
 
+  def _orbit_role(self) -> str:
+    try:
+      return rol_etiqueta(self._params.get(PARAM_OWNER_ROLE))
+    except UnknownKeyName:
+      return ""
+
+  # Dueño y rol juntos (contrato C2): "Ana • desarrollador"; el rol se omite si no se conoce.
+  def _orbit_account_text(self) -> str:
+    return " • ".join(x for x in (self._orbit_owner(), self._orbit_role()) if x) or tr("N/A")
+
   def _orbit_unlink_prompt(self):
     def perform_unlink(result: DialogResult):
       if result != DialogResult.CONFIRM:
@@ -114,6 +125,10 @@ class DeviceLayout(Widget):
       try:
         self._params.put_bool("OrbitClaimed", False)
         self._params.remove("OrbitOwner")
+        self._params.remove(PARAM_OWNER_ROLE)
+        # Fuerza un codigo nuevo: el de antes se borro al reclamar y, sin esto, el QR
+        # sale vacio hasta que caduque el TTL del codigo en memoria (600 s).
+        self._params.put_bool("OrbitEnrollRegen", True)
       except UnknownKeyName:
         cloudlog.exception("OrbitClaimed/OrbitOwner not registered")
 

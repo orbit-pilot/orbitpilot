@@ -10,7 +10,7 @@ from openpilot.common.params import Params
 from openpilot.orbit import config_broker
 from openpilot.common.swaglog import cloudlog
 import os
-from .mqtt_comandos import CONN_SIN_BROKER_SECS, MQTTComandos, espera_reintento
+from .mqtt_comandos import CONN_SIN_BROKER_SECS, MQTTComandos, espera_reintento, tipo_dispositivo
 from .camera_sender import CameraSender
 from .command_state import get_command_plane
 from . import telemetria_v1 as tel2
@@ -2051,8 +2051,11 @@ class MQTTEnvioGeneral:
           "issued_at": int(self._enroll_issued_at * 1000),
           "ttl_s": self.ENROLL_TTL_S,
           "fw": fw,
-          "hw": "comma3x",
         }
+        # Modelo real (tici | tizi | mici | pc), el mismo que va en caps. Antes era un
+        # "comma3x" fijo, falso en un comma 4. Si no se puede leer, se omite.
+        if hw := tipo_dispositivo():
+          payload["hw"] = hw
         self.mqttc.publish(f"telemetry_mqtt/{d}/enroll", json.dumps(payload), qos=0, retain=False)
         self._last_enroll = now
     except Exception as e:

@@ -49,6 +49,19 @@ PARAM_STEER_MODE = "SteerTorqueMode"       # INT 0..3
 # pasar a offroad (flags del param), y lo retira esta misma pantalla al salir del modo.
 PARAM_STEER_LOCAL = "OrbitSteerModeLocal"  # BOOL
 
+# Cuenta ORBIT del dueño. Los escribe mqtt_comandos al recibir el enroll_ack
+# (retenido) del backend; la UI solo los lee.
+PARAM_OWNER = "OrbitOwner"                 # STRING: nombre o email
+PARAM_OWNER_ROLE = "OrbitOwnerRole"        # STRING: user | developer | superadmin
+ROL_ETIQUETA = {"user": "usuario", "developer": "desarrollador", "superadmin": "superadmin"}
+
+
+def rol_etiqueta(rol) -> str:
+  """Etiqueta en pantalla del rol ORBIT del dueño; '' si no se conoce."""
+  if isinstance(rol, bytes):
+    rol = rol.decode(errors="ignore")
+  return ROL_ETIQUETA.get(str(rol or "").strip().lower(), "")
+
 # Interruptor maestro de privacidad. TODAVIA NO ESTA REGISTRADO en common/params_keys.h
 # (ese fichero no se toca desde aqui), asi que cada acceso va envuelto en UnknownKeyName
 # y el corte real se aplica ademas por los caminos que YA se honran en caliente
@@ -164,6 +177,12 @@ class CommandStateView:
   SERVICE = "orbitCommandState"
 
   def __init__(self):
+    self._limpiar()
+
+  def _limpiar(self) -> None:
+    # No se conserva el ultimo valor conocido: un plano muerto no describe el coche
+    # de ahora, y pintar un estado rancio como si fuera vivo es justo el fallo que
+    # este panel existe para evitar.
     self.available = False
     self.mode = "observer"
     self.active_verb = ""
@@ -173,28 +192,22 @@ class CommandStateView:
     self.clock_synced = False
     self.gates = 0
     self.link_fresh = False
+    # seq: ultimo seq APLICADO (solo avanza con ordenes que pasaron modo y gates y van a
+    # ejecutarse). deadline_mono: fin de la ventana del actuador remoto en time.monotonic()
+    # de SISTEMA (command_state.py); 0.0 = ningun actuador remoto vivo.
+    self.seq = 0
+    self.deadline_mono = 0.0
 
   def update(self, sm) -> None:
     try:
       alive = bool(sm.alive[self.SERVICE]) and bool(sm.valid[self.SERVICE])
     except (KeyError, TypeError):
       # El servicio no esta en el SubMaster de este build: no hay plano que leer.
-      self.available = False
+      self._limpiar()
       return
 
     if not alive:
-      self.available = False
-      # No se conserva el ultimo valor conocido: un plano muerto no describe el coche
-      # de ahora, y pintar un estado rancio como si fuera vivo es justo el fallo que
-      # este panel existe para evitar.
-      self.mode = "observer"
-      self.active_verb = ""
-      self.last_ack_phase = "none"
-      self.last_reason = ""
-      self.bench_armed = False
-      self.clock_synced = False
-      self.gates = 0
-      self.link_fresh = False
+      self._limpiar()
       return
 
     try:
@@ -208,9 +221,17 @@ class CommandStateView:
       self.gates = int(st.gates)
       # Bit linkFresh del enum Gate de cereal/custom.capnp (1 << 8).
       self.link_fresh = bool(self.gates & (1 << 8))
+      self.seq = int(st.seq)
+      self.deadline_mono = float(st.deadlineMono)
       self.available = True
-    except (KeyError, AttributeError, ValueError):
-      self.available = False
+    except (KeyError, AttributeError, ValueError, TypeError):
+      self._limpiar()
+
+  @property
+  def actuator_live(self) -> bool:
+    """Ventana de actuador remoto abierta AHORA (deadman de la seccion 5). Mismo reloj
+    que el publicador: CLOCK_MONOTONIC de sistema, comparable entre procesos."""
+    return self.available and self.deadline_mono > time.monotonic()
 
   # ------------------------------------------------------------------- etiquetas
   @property

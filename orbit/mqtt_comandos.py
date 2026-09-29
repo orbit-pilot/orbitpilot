@@ -20,6 +20,7 @@ Lo que NO pasa por el router, y por que: `jetson_config`, `camera_config`, `enro
 identidad, no ordenes de conduccion, y ninguno mueve un actuador. Estan enumerados uno a
 uno en el docstring de on_message con lo que hace cada uno.
 """
+import functools
 import json
 import time
 import threading
@@ -54,6 +55,27 @@ def espera_reintento(fallos_previos: int) -> float:
   `fallos_previos` es cuantos connect() habian fallado YA antes de este (0 en el primero).
   """
   return CONN_RETRY_SECS[min(fallos_previos, len(CONN_RETRY_SECS) - 1)]
+
+
+# Roles de la cuenta ORBIT del dueno que el firmware acepta en el enroll_ack. Otro valor
+# (o ninguno, backend viejo) borra OrbitOwnerRole: la UI no pinta un rol que no conoce.
+ROLES_DUENO = ("user", "developer", "superadmin")
+PARAM_OWNER_ROLE = "OrbitOwnerRole"
+
+
+@functools.cache
+def tipo_dispositivo() -> str | None:
+  """Modelo del comma (tici | tizi | mici | pc) para caps y el anuncio de enrolamiento.
+
+  Cacheado tambien cuando falla: un devicetree ilegible no se relee (ni se loguea) en
+  cada tick. None = desconocido; quien lo use omite la clave en vez de inventarla.
+  """
+  try:
+    from openpilot.system.hardware import HARDWARE
+    return HARDWARE.get_device_type() or None
+  except Exception:
+    cloudlog.exception("[Orbit] no se pudo leer el tipo de dispositivo")
+    return None
 
 
 class MQTTComandos:
@@ -195,6 +217,9 @@ class MQTTComandos:
       return False
     try:
       payload = self.router.capabilities_payload(fw=self._fw)
+      # Modelo del comma para que backend y app distingan comma 4 (mici) de 3X (tizi).
+      if tipo := tipo_dispositivo():
+        payload["device_type"] = tipo
       # La huella ignora ts_ms: si no, cambiaria en cada tick y republicaria siempre.
       huella = json.dumps({k: v for k, v in payload.items() if k != "ts_ms"}, sort_keys=True)
       if not forzar and huella == self._caps_huella:
@@ -705,7 +730,8 @@ class MQTTComandos:
                         y ancho de banda, no conduccion. El interruptor local de la
                         pantalla lo sigue mandando (seccion 9, innegociable).
       /enroll_ack       marca el dispositivo como reclamado/liberado (OrbitClaimed,
-                        OrbitOwner, codigo de emparejamiento). Es identidad.
+                        OrbitOwner, OrbitOwnerRole, codigo de emparejamiento). Es
+                        identidad.
       /speed_increment  guarda el tamano del paso de crucero (param FLOAT). No mueve el
                         coche por si mismo, y el consumidor lo acota ademas a [1, 5] km/h,
                         que es el limite por orden que declara el verbo cruise_delta.
@@ -1133,7 +1159,7 @@ class MQTTComandos:
 
     Payloads esperados (contrato compartido con el backend):
       reclamo:  {"claimed": true, "user_id": <int>, "user_name": <str|null>,
-                 "user_email": <str|null>, "ts": <epoch>}
+                 "user_email": <str|null>, "user_role": <str>, "ts": <epoch>}
       liberado: {"claimed": false, "ts": <epoch>}
 
     Al recibir claimed=true marcamos el dispositivo como reclamado
@@ -1144,6 +1170,10 @@ class MQTTComandos:
     vuelva a anunciar de inmediato. Backends viejos pueden no mandar
     user_name/user_email: se cae a user_id. No hace falta anti-eco: el
     firmware nunca publica enroll_ack.
+
+    user_role (user | developer | superadmin) va a OrbitOwnerRole solo para
+    que la UI lo ENSENE: no abre ni cierra ningun gate del coche. Ausente o
+    desconocido -> se borra. Con claimed=false se borra junto a OrbitOwner.
     """
     try:
       import json as json_mod
@@ -1158,6 +1188,8 @@ class MQTTComandos:
           owner = f"usuario {data.get('user_id')}"
         if owner:
           self.params.put("OrbitOwner", owner)
+        rol = data.get("user_role")
+        self._poner_rol_dueno(rol if rol in ROLES_DUENO else None)
         cloudlog.warning(f"[ORBIT ENROLL] Dispositivo reclamado (user_id={data.get('user_id')}, owner={owner!r}, ts={data.get('ts')})")
         print("[ORBIT ENROLL] Dispositivo reclamado, OrbitClaimed=True")
       elif claimed is False:
@@ -1165,6 +1197,7 @@ class MQTTComandos:
         self.params.remove("OrbitOwner")
         self.params.remove("OrbitPairingCode")
         self.params.put_bool("OrbitEnrollRegen", True)
+        self._poner_rol_dueno(None)
         cloudlog.warning(f"[ORBIT ENROLL] Dispositivo liberado (unclaim, ts={data.get('ts')})")
         print("[ORBIT ENROLL] Dispositivo liberado, OrbitClaimed=False")
       else:
@@ -1172,6 +1205,19 @@ class MQTTComandos:
 
     except Exception as e:
       print(f"[ORBIT ENROLL] ERROR handle_enroll_ack: {e}")
+
+  def _poner_rol_dueno(self, rol):
+    """Escribe (o borra con None) OrbitOwnerRole SOLO si cambia: el backend republica el
+    enroll_ack retenido en cada reconexion y no hace falta reescribir el disco cada vez."""
+    try:
+      if (self.params.get(PARAM_OWNER_ROLE) or None) == rol:
+        return
+      if rol:
+        self.params.put(PARAM_OWNER_ROLE, rol)
+      else:
+        self.params.remove(PARAM_OWNER_ROLE)
+    except Exception:
+      cloudlog.exception("[ORBIT ENROLL] no se pudo actualizar OrbitOwnerRole")
 
   def set_camera_sender(self, camera_sender):
     """Establece la referencia al CameraSender para control remoto desde la app."""
