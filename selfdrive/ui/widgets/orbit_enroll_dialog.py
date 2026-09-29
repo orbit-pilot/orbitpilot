@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pyray as rl
 import qrcode
 import numpy as np
@@ -12,6 +14,39 @@ from openpilot.system.ui.lib.wrap_text import wrap_text
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets.button import Button, ButtonStyle, IconButton
 from openpilot.selfdrive.ui import orbit_theme as t
+from openpilot.selfdrive.ui.widgets.orbit_ajustes import texto_caducidad, url_enrolamiento
+from openpilot.selfdrive.ui.widgets.orbit_mando import PARAM_OWNER_ROLE, rol_etiqueta
+
+
+def generar_textura_qr(url: str, previa: rl.Texture | None = None) -> rl.Texture | None:
+  """Textura del QR de vinculacion; la comparten el comma 3X y el comma 4.
+
+  Modulos NEGROS sobre BLANCO con zona de silencio de 4 modulos (border=4): el escaner
+  de la app (mobile_scanner) no esta verificado con QR invertidos. Libera `previa`.
+  None si falla la generacion.
+  """
+  try:
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+    qr.add_data(url)
+    qr.make(fit=True)
+
+    pil_img = qr.make_image(fill_color="black", back_color="white").convert('RGBA')
+    img_array = np.array(pil_img, dtype=np.uint8)
+
+    if previa and previa.id != 0:
+      rl.unload_texture(previa)
+
+    rl_image = rl.Image()
+    rl_image.data = rl.ffi.cast("void *", img_array.ctypes.data)
+    rl_image.width = pil_img.width
+    rl_image.height = pil_img.height
+    rl_image.mipmaps = 1
+    rl_image.format = rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+
+    return rl.load_texture_from_image(rl_image)
+  except Exception:
+    cloudlog.exception("QR code generation failed")
+    return None
 
 
 class OrbitEnrollDialog(Widget):
@@ -45,32 +80,10 @@ class OrbitEnrollDialog(Widget):
     except Exception:
       cloudlog.exception("Failed to read DongleId")
       dongle_id = ""
-    code = self._get_pairing_code()
-    return f"orbit://enroll?d={dongle_id}&c={code}"
+    return url_enrolamiento(dongle_id, self._get_pairing_code())
 
   def _generate_qr_code(self) -> None:
-    try:
-      qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
-      qr.add_data(self._get_pairing_url())
-      qr.make(fit=True)
-
-      pil_img = qr.make_image(fill_color="black", back_color="white").convert('RGBA')
-      img_array = np.array(pil_img, dtype=np.uint8)
-
-      if self.qr_texture and self.qr_texture.id != 0:
-        rl.unload_texture(self.qr_texture)
-
-      rl_image = rl.Image()
-      rl_image.data = rl.ffi.cast("void *", img_array.ctypes.data)
-      rl_image.width = pil_img.width
-      rl_image.height = pil_img.height
-      rl_image.mipmaps = 1
-      rl_image.format = rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
-
-      self.qr_texture = rl.load_texture_from_image(rl_image)
-    except Exception:
-      cloudlog.exception("QR code generation failed")
-      self.qr_texture = None
+    self.qr_texture = generar_textura_qr(self._get_pairing_url(), self.qr_texture)
 
   def _check_qr_refresh(self) -> None:
     current_time = time.monotonic()
@@ -96,14 +109,10 @@ class OrbitEnrollDialog(Widget):
 
   def _get_countdown_text(self) -> str:
     try:
-      expiry_ms = int(self.params.get("OrbitEnrollExpiry") or 0)
+      expiry = self.params.get("OrbitEnrollExpiry")
     except Exception:
-      expiry_ms = 0
-    if expiry_ms <= 0:
-      return ""
-    remaining = max(0, int(expiry_ms / 1000 - time.time()))  # noqa: TID251 (OrbitEnrollExpiry is epoch ms)
-    minutes, seconds = divmod(remaining, 60)
-    return f"caduca en {minutes}:{seconds:02d}"
+      expiry = 0
+    return texto_caducidad(expiry, time.time_ns() // 1_000_000)
 
   def _update_state(self):
     # On claim, hold a success confirmation for a moment before closing.
@@ -253,18 +262,31 @@ class OrbitEnrollDialog(Widget):
     # Big green check + owner, held briefly by _update_state before the pop.
     owner = self._get_owner()
     text = f"Vinculado - {owner}" if owner else "Vinculado a ORBIT"
+    try:
+      rol = rol_etiqueta(self.params.get(PARAM_OWNER_ROLE))
+    except Exception:
+      rol = ""
     font = gui_app.font(FontWeight.BOLD)
+    rol_font = gui_app.font(FontWeight.NORMAL)
 
     check_size = 220
+    rol_size = 48
     check_measure = measure_text_cached(font, "✓", check_size)
     text_measure = measure_text_cached(font, text, 64)
+    # El rol del dueno (contrato C2) en su PROPIA linea: pegado al nombre, un OrbitOwner
+    # largo (es el email si no hay nombre) se salia de la pantalla antes que sin el.
+    rol_measure = measure_text_cached(rol_font, rol, rol_size) if rol else None
     gap = 40
-    block_h = check_measure.y + gap + text_measure.y
+    block_h = check_measure.y + gap + text_measure.y + (12 + rol_measure.y if rol_measure else 0)
     cx = rect.x + rect.width / 2
     y = rect.y + (rect.height - block_h) / 2
 
     rl.draw_text_ex(font, "✓", rl.Vector2(int(cx - check_measure.x / 2), int(y)), check_size, 0.0, t.OK)
-    rl.draw_text_ex(font, text, rl.Vector2(int(cx - text_measure.x / 2), int(y + check_measure.y + gap)), 64, 0.0, t.TEXTO1)
+    text_y = y + check_measure.y + gap
+    rl.draw_text_ex(font, text, rl.Vector2(int(cx - text_measure.x / 2), int(text_y)), 64, 0.0, t.TEXTO1)
+    if rol_measure:
+      rl.draw_text_ex(rol_font, rol, rl.Vector2(int(cx - rol_measure.x / 2), int(text_y + text_measure.y + 12)), rol_size,
+                      0.0, t.TEXTO2)
 
   def __del__(self):
     if self.qr_texture and self.qr_texture.id != 0:

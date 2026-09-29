@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.mici.widgets.button import BigCircleButton
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog, BigDialog
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.sunnylink import SunnylinkLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.models import ModelsLayoutMici
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.orbit import OrbitLayoutMici
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr
@@ -32,11 +33,12 @@ class SettingsLayoutSP(OP.SettingsLayout):
                                                 BIG_ICON_SIZE)
     self.icon_offroad_slider = gui_app.texture("icons_mici/settings/device/lkas.png", BIG_ICON_SIZE, BIG_ICON_SIZE)
 
-    sunnylink_panel = SunnylinkLayoutMici(back_callback=gui_app.pop_widget)
+    # NavWidget ya hace pop al deslizar; gui_app.pop_widget aqui sacaba tambien los ajustes (volvia al home)
+    sunnylink_panel = SunnylinkLayoutMici(back_callback=lambda: None)
     sunnylink_btn = SettingsBigButton(tr("sunnylink"), "", gui_app.texture("icons_mici/settings/developer/ssh.png", 55, 55))
     sunnylink_btn.set_click_callback(lambda: gui_app.push_widget(sunnylink_panel))
 
-    models_panel = ModelsLayoutMici(back_callback=gui_app.pop_widget)
+    models_panel = ModelsLayoutMici(back_callback=lambda: None)
     models_btn = SettingsBigButton(tr("models"), "", gui_app.texture("../../sunnypilot/selfdrive/assets/offroad/icon_models.png", ICON_SIZE, ICON_SIZE))
     models_btn.set_click_callback(lambda: gui_app.push_widget(models_panel))
 
@@ -54,10 +56,18 @@ class SettingsLayoutSP(OP.SettingsLayout):
     self._disable_offroad_btn.set_click_callback(lambda: self._handle_always_offroad(False))
     self._disable_offroad_btn.set_visible(lambda: ui_state.always_offroad)
 
+    # ORBIT: el mismo panel que el comma 3X, en baldosas mici. Sin back_callback: NavWidget
+    # ya hace pop al deslizar, y pasar gui_app.pop_widget sacaria tambien los ajustes.
+    orbit_panel = OrbitLayoutMici()
+    orbit_btn = SettingsBigButton("orbit", "", gui_app.texture("img_orbit_logo.png", 64, 64))
+    orbit_btn.set_click_callback(lambda: gui_app.push_widget(orbit_panel))
+
     items = self._scroller._items.copy()
 
     items.insert(1, sunnylink_btn)
     items.insert(2, models_btn)
+    # primera baldosa normal (la UI grande tambien abre los ajustes en ORBIT)
+    items.insert(0, orbit_btn)
 
     # front slots (only one ever visible at a time): exit-always-offroad, then enable-onroad
     items.insert(0, self._enable_offroad_btn_onroad)

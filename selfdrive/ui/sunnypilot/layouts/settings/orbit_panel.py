@@ -25,17 +25,16 @@ EL ESTADO DEL MANDO SE LEE DE CEREAL, NO DE PARAMS. `ui_state.orbit_command` es 
 vista del mensaje `orbitCommandState` (10 Hz) que refresca UIStateSP en cada frame. Los
 unicos Params que se leen aqui son los de la cuenta atras del armado, y a 1 Hz.
 """
-import functools
 import time
 from enum import IntEnum
 
 import pyray as rl
 
-from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.layouts.settings import settings as OP
 from openpilot.selfdrive.ui import orbit_theme as t
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets import orbit_mando as mando
+from openpilot.selfdrive.ui.widgets import orbit_ajustes as ajustes
 from openpilot.selfdrive.ui.widgets.orbit_enroll_dialog import OrbitEnrollDialog
 from openpilot.selfdrive.ui.widgets.orbit_section import SectionHeaderSP
 from openpilot.selfdrive.ui.widgets.orbit_server import ServerMonitor
@@ -52,10 +51,6 @@ from openpilot.selfdrive.ui.sunnypilot.layouts.settings.orbit_sub_layouts.server
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.orbit_sub_layouts.steer_mode import SteerModeRows
 
 _REFRESH_SECONDS = 1.0
-# El heartbeat MQTT escribe OrbitLastPublish cada ~3 s; sin dato fresco en 30 s
-# el enlace se considera caido aunque OrbitConnected quedara en True (el
-# proceso pudo morir sin escribir el False de despedida).
-_LINK_STALE_SECONDS = 30.0
 
 # Barra anclada de DESARMAR TODO.
 _DISARM_BAR_HEIGHT = 132
@@ -84,33 +79,45 @@ def _a_salvo(etiqueta: str, avisar: bool = False):
   cuenta con un dialogo: una accion que falla muda es peor que una que no existe. Los
   refrescos de pintado solo lo dejan en el log (van a 1 Hz, no inundan).
   """
-  def decorador(fn):
-    @functools.wraps(fn)
-    def envoltura(*args, **kwargs):
-      try:
-        return fn(*args, **kwargs)
-      except Exception:
-        cloudlog.exception(f"[Orbit/UI] {etiqueta}: excepcion no controlada")
-        if avisar:
-          try:
-            gui_app.push_widget(alert_dialog(tr("Fallo interno en:") + f" {etiqueta}\n" +
-                                             tr("La accion no se ha completado. Revisa el log de la UI.")))
-          except Exception:
-            cloudlog.exception("[Orbit/UI] no se pudo mostrar el aviso de fallo")
-        return None
-    return envoltura
-  return decorador
+  return ajustes.a_salvo(etiqueta, _avisar_fallo if avisar else None)
 
 
-def _publish_age(params) -> float:
-  """Segundos desde el ultimo publish MQTT; inf si no hay dato."""
-  try:
-    last = params.get("OrbitLastPublish")
-    if last:
-      return max(0.0, (time.time_ns() / 1e9) - float(last))
-  except Exception:
-    pass
-  return float("inf")
+def _avisar_fallo(etiqueta: str) -> None:
+  gui_app.push_widget(alert_dialog(tr("Fallo interno en:") + f" {etiqueta}\n" +
+                                   tr("La accion no se ha completado. Revisa el log de la UI.")))
+
+
+# Tinta de cada tono de ajustes.lineas_mando.
+_TONOS = {"ok": OP.ORBIT_GREEN, "aviso": _AMBER, "peligro": _RED, "normal": OP.ORBIT_INK}
+
+
+def ayuda_html() -> str:
+  """Definiciones de la terminologia que menos se explica sola (HTML <h2>/<p>).
+
+  Funcion de modulo: la usa este panel y la pagina de ayuda del comma 4
+  (sunnypilot/mici/layouts/orbit.py), asi que las dos pantallas dicen lo mismo.
+  """
+  return (
+    "<h2>" + tr("ARMAR (modo banco)") + "</h2><p>" +
+    tr("Habilita durante 5 minutos los verbos de control fisico (torque del volante, " +
+       "pulso de direccion, control directo) para que se ejecuten DE FORMA REMOTA " +
+       "desde la app. Se arma solo desde esta pantalla, con el coche parado y alguien " +
+       "delante. Se desarma solo al agotarse el tiempo, al superar los 5 km/h o al " +
+       "pasar a offroad.") + "</p>" +
+    "<h2>" + tr("DESARMAR TODO") + "</h2><p>" +
+    tr("Cancela cualquier orden en curso y devuelve el control. Es la unica accion " +
+       "que funciona siempre, desde cualquier pantalla y aunque la conexion vaya mal.") + "</p>" +
+    "<h2>" + tr("MODO (observador / copiloto / maniobra)") + "</h2><p>" +
+    tr("El nivel de autoridad que la app tiene sobre el coche. El coche arranca " +
+       "siempre en observador; subir el modo desde la app solo dura un rato " +
+       "(copiloto 15 min, maniobra 2 min).") + "</p>" +
+    "<h2>" + tr("ENLACE") + "</h2><p>" +
+    tr("Salud de la conexion de mando con el servidor. Si esta caido, las ordenes " +
+       "remotas no llegan.") + "</p>" +
+    "<h2>" + tr("BANCO ARMADO") + "</h2><p>" +
+    tr("El modo banco esta activo y quedan los segundos que se muestran. Mientras " +
+       "este armado, la app puede ejecutar verbos de control fisico.") + "</p>"
+  )
 
 
 class PanelType(IntEnum):
@@ -173,17 +180,17 @@ class _MandoCard(Widget):
     _, self._bench_restante = mando.bench_snapshot()
 
     params = ui_state.params
-    connected = params.get_bool("OrbitConnected") and _publish_age(params) <= _LINK_STALE_SECONDS
-    owner = params.get("OrbitOwner")
-    owner = owner.strip() if isinstance(owner, str) else ""
+    connected = ajustes.enlace_orbit(params)
+    # Dueno + rol ("ADRIAN • SUPERADMIN"): el rol lo escribe mqtt_comandos desde el
+    # enroll_ack del backend (contrato C2).
+    cuenta = ajustes.etiqueta_cuenta(params.get(mando.PARAM_OWNER), params.get(mando.PARAM_OWNER_ROLE)).upper()
 
     server_ok = self._monitor.broker_ok and self._monitor.backend_ok
-    cuenta = owner.split()[0][:12].upper() if owner else tr("SIN VINCULAR")
 
     self._chips = [
       (tr("SERVIDOR"), server_ok),
       (tr("ENLACE"), connected),
-      (cuenta, bool(owner)),
+      (cuenta or tr("SIN VINCULAR"), bool(cuenta)),
     ]
 
   # --------------------------------------------------------------------- pintado
@@ -258,9 +265,12 @@ class _MandoCard(Widget):
                       rl.Vector2(x, y + 48), 26, 0, OP.ORBIT_MUTED)
       return
 
+    # Modo / enlace / ultimo comando: el texto y el tono salen de ajustes.lineas_mando
+    # (el comma 4 pinta lo mismo); aqui solo se pone la tinta y la geometria.
+    (modo_et, modo_val, modo_tono), (enl_et, enl_val, enl_tono), (ult_et, texto, ult_tono) = ajustes.lineas_mando(st)
+
     # 1) modo vigente + chip de armado con cuenta atras
-    modo_color = OP.ORBIT_GREEN if st.mode == "observer" else _AMBER
-    self._line(y, x, tr("MODO"), st.mode_label, modo_color)
+    self._line(y, x, modo_et, modo_val, _TONOS[modo_tono])
     if st.bench_armed:
       etiqueta = tr("BANCO ARMADO") + f"  {int(self._bench_restante)}s"
       size = measure_text_cached(self._font_bold, etiqueta, 24, 1)
@@ -271,30 +281,15 @@ class _MandoCard(Widget):
 
     # 2) salud del enlace de mando
     y += 62
-    if not st.link_ok:
-      enlace, color = tr("CAIDO"), _RED
-    elif not st.clock_synced:
-      # Sin reloj sincronizado el router rechaza todo verbo de banco: decirlo aqui evita
-      # el "el coche no responde y no se por que".
-      enlace, color = tr("OK - reloj sin sincronizar"), _AMBER
-    else:
-      enlace, color = tr("OK"), OP.ORBIT_GREEN
-    self._line(y, x, tr("ENLACE"), enlace, color)
+    self._line(y, x, enl_et, enl_val, _TONOS[enl_tono])
 
     # 3) ultimo comando y como acabo
     y += 62
-    if st.last_ack_phase != "none":
-      texto = f"{st.active_verb or '-'}  -  {st.phase_label}"
-      if st.last_reason:
-        texto += f"  ({st.last_reason})"
-    else:
-      texto = tr("ninguno")
-    color = _RED if st.phase_is_bad else OP.ORBIT_INK
     # El motivo puede ser largo: se recorta al ancho de la tarjeta en vez de desbordarla.
     max_w = card.width - (x - card.x) - self.VALUE_X - pad
     while texto and measure_text_cached(self._font_bold, texto, 30, 0).x > max_w:
       texto = texto[:-1]
-    self._line(y, x, tr("ULTIMO COMANDO"), texto, color, size=30)
+    self._line(y, x, ult_et, texto, _TONOS[ult_tono], size=30)
 
 
 class OrbitLayout(Widget):
@@ -404,16 +399,7 @@ class OrbitLayout(Widget):
       self._apply_bench_disarm()
       return
 
-    # El texto dice que habilita mandos REMOTOS porque es exactamente lo que hace, y es el
-    # dato que decide si armar o no. Elegir el modo de volante EN ESTA PANTALLA no necesita
-    # esto: eso va por OrbitSteerModeLocal y no abre nada por MQTT.
-    msg = tr("Armar el MODO BANCO durante 5 minutos?\n\n" +
-             "Mientras este armado, los verbos de control fisico (torque del volante, pulso " +
-             "de direccion, control directo) pasan a ser ejecutables DE FORMA REMOTA desde " +
-             "la app. Armalo solo con el coche parado y contigo delante.\n\n" +
-             "No hace falta para elegir el modo de volante en esta pantalla.\n\n" +
-             "Se desarma solo al agotarse los 5 minutos, al superar los 5 km/h y al pasar " +
-             "a offroad.")
+    msg = ajustes.texto_armar_banco()
 
     def on_result(result: DialogResult):
       if result != DialogResult.CONFIRM:
@@ -456,27 +442,7 @@ class OrbitLayout(Widget):
     plano (rich=False) recorta con scissor lo que no cabe en el area fija del modal.
     Con rich el contenido se desplaza y nada se pierde.
     """
-    msg = (
-      "<h2>" + tr("ARMAR (modo banco)") + "</h2><p>" +
-      tr("Habilita durante 5 minutos los verbos de control fisico (torque del volante, "
-         "pulso de direccion, control directo) para que se ejecuten DE FORMA REMOTA "
-         "desde la app. Se arma solo desde esta pantalla, con el coche parado y alguien "
-         "delante. Se desarma solo al agotarse el tiempo, al superar los 5 km/h o al "
-         "pasar a offroad.") + "</p>" +
-      "<h2>" + tr("DESARMAR TODO") + "</h2><p>" +
-      tr("Cancela cualquier orden en curso y devuelve el control. Es la unica accion "
-         "que funciona siempre, desde cualquier pantalla y aunque la conexion vaya mal.") + "</p>" +
-      "<h2>" + tr("MODO (observador / copiloto / maniobra)") + "</h2><p>" +
-      tr("El nivel de autoridad que la app tiene sobre el coche. El coche arranca "
-         "siempre en observador; subir el modo desde la app solo dura un rato "
-         "(copiloto 15 min, maniobra 2 min).") + "</p>" +
-      "<h2>" + tr("ENLACE") + "</h2><p>" +
-      tr("Salud de la conexion de mando con el servidor. Si esta caido, las ordenes "
-         "remotas no llegan.") + "</p>" +
-      "<h2>" + tr("BANCO ARMADO") + "</h2><p>" +
-      tr("El modo banco esta activo y quedan los segundos que se muestran. Mientras "
-         "este armado, la app puede ejecutar verbos de control fisico.") + "</p>"
-    )
+    msg = ayuda_html()
     gui_app.push_widget(ConfirmDialog(msg, tr("OK"), rich=True))
 
   # ------------------------------------------------------------------ desarmar todo
@@ -502,15 +468,7 @@ class OrbitLayout(Widget):
 
   # -------------------------------------------------- restablecer valores seguros
   def _confirm_safe_reset(self):
-    msg = tr("Restablecer los params ORBIT de conduccion a valores seguros?\n\n" +
-             "- Modo de volante: COMMA\n" +
-             "- Armado de banco y modo del mando: desarmados\n" +
-             "- Frenado de emergencia remoto: OFF\n" +
-             "- Cambios de carril forzados pendientes: borrados\n" +
-             "- Pulso de direccion remoto: borrado\n" +
-             "- Alertas de comunicacion: visibles\n\n" +
-             "No toca la configuracion de servidor, telemetria ni Jetson (IPs/puertos), " +
-             "ni el interruptor de privacidad.")
+    msg = ajustes.texto_valores_seguros()
 
     def on_result(result: DialogResult):
       if result != DialogResult.CONFIRM:
@@ -521,58 +479,8 @@ class OrbitLayout(Widget):
 
   @_a_salvo("restablecer valores seguros", avisar=True)
   def _apply_safe_reset(self):
-    """Escrituras INDEPENDIENTES, cada una con su try y su log.
-
-    Antes esto era un unico try/except global alrededor de las cinco escrituras: si la
-    primera fallaba (y la primera era `put("SteerTorqueMode", 0)`, la mas propensa,
-    porque un put con el tipo equivocado lanza TypeError) las otras cuatro ni se
-    intentaban y el usuario no se enteraba de nada. Un boton de panico que falla mudo
-    es peor que no tener boton.
-    """
-    params = ui_state.params
-    fallos: list[str] = []
-
-    def _put(clave, valor):
-      try:
-        # block=True: la escritura por defecto es asincrona y el resultado que se pinta
-        # justo despues seria el valor viejo (ver la nota de orbit_mando._BLOQUEANTE).
-        params.put(clave, valor, True)
-      except Exception:
-        cloudlog.exception(f"[Orbit/UI] valores seguros: fallo {clave}")
-        fallos.append(clave)
-
-    def _put_bool(clave, valor):
-      try:
-        params.put_bool(clave, valor, True)
-      except Exception:
-        cloudlog.exception(f"[Orbit/UI] valores seguros: fallo {clave}")
-        fallos.append(clave)
-
-    def _remove(clave):
-      try:
-        params.remove(clave)
-      except Exception:
-        cloudlog.exception(f"[Orbit/UI] valores seguros: fallo borrar {clave}")
-        fallos.append(clave)
-
-    # 1. fuente de torque del volante (INT: put exige int nativo)
-    _put("SteerTorqueMode", 0)
-    # 2. frenado remoto
-    _put_bool("brutebreak_active", False)
-    # 3. cambios de carril forzados pendientes
-    _put_bool("ForceLaneChangeLeft", False)
-    _put_bool("ForceLaneChangeRight", False)
-    # 4. pulso de direccion remoto
-    _remove("orbit_steering_pulse")
-    # 5. autoridad del mando: armado de banco y modo, por si el hilo ORBIT esta caido
-    fallos.extend(mando.disarm_bench())
-    _put(mando.PARAM_COMMAND_MODE, 0)
-    # 6. HUD de adelantamiento: sic_adelantar es PERSISTENT y su overlay ya no existe;
-    #    apagarlo aqui evita dejar un flag encendido que nadie puede volver a apagar.
-    _put_bool("sic_adelantar", False)
-    # 7. volcado de mensajes MQTT a /tmp (era PERSISTENT|BACKUP y sobrevivia a reinicios
-    #    y a copias de seguridad; su panel ya no existe, pero el escritor sigue)
-    _put_bool("modo_debug", False)
+    """Siete grupos de escrituras independientes: ver ajustes.aplicar_valores_seguros."""
+    fallos = ajustes.aplicar_valores_seguros(ui_state.params)
 
     guard = getattr(ui_state, "orbit_bench_guard", None)
     if guard is not None:
@@ -582,7 +490,7 @@ class OrbitLayout(Widget):
 
     if fallos:
       gui_app.push_widget(alert_dialog(tr("RESTABLECIMIENTO INCOMPLETO. Han fallado:") +
-                                       "\n" + "\n".join(sorted(set(fallos)))))
+                                       "\n" + "\n".join(fallos)))
 
   # ------------------------------------------------------------------ estado vivo
   @_a_salvo("refresco del estado del armado")
@@ -594,16 +502,13 @@ class OrbitLayout(Widget):
 
     armado, restante_s = mando.bench_snapshot()
     self._bench_armed = armado
-    if armado:
-      # Solo existe UN motivo de armado (ARM_REASON_BENCH, el boton de esta pantalla):
-      # el selector de volante ya no arma el banco, va por OrbitSteerModeLocal (ver
-      # steer_mode.py). Esta rama comparaba con `mando.ARM_REASON_STEER`, una constante
-      # que se retiro con ese cambio, y como solo se ejecuta con el banco ARMADO nadie lo
-      # vio hasta que alguien pulso ARMAR en el coche: AttributeError en cada frame, muerte
-      # del proceso ui y bucle de reinicios (ver _a_salvo).
-      self._bench_status = tr("ARMADO") + f" - {int(restante_s)}s " + tr("restantes")
-    else:
-      self._bench_status = tr("Desarmado. Los verbos de banco se rechazan.")
+    # Solo existe UN motivo de armado (ARM_REASON_BENCH, el boton de esta pantalla): el
+    # selector de volante no arma el banco, va por OrbitSteerModeLocal (ver steer_mode.py).
+    # Aqui se comparaba con `mando.ARM_REASON_STEER`, una constante que se retiro con ese
+    # cambio, y como solo se ejecutaba con el banco ARMADO nadie lo vio hasta que alguien
+    # pulso ARMAR en el coche: AttributeError en cada frame, muerte del proceso ui y bucle
+    # de reinicios (ver _a_salvo).
+    self._bench_status = ajustes.texto_estado_banco(armado, restante_s)
 
   # -------------------------------------------------------------------- lifecycle
   def _set_current_panel(self, panel: PanelType):

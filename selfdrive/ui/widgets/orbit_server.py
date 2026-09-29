@@ -64,6 +64,11 @@ def probe_backend(ip: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
+def probar_servidor(ip: str, port: int, timeout: float = 3.0) -> tuple[bool, bool]:
+  """(broker_ok, backend_ok): the "test connection" probes, shared by both UIs. Blocking."""
+  return probe_server(ip, port, timeout=timeout), probe_backend(ip, read_backend_port(), timeout=timeout)
+
+
 class ServerMonitor:
   """Background poller that keeps the current server IP and reachability
   (broker TCP + backend HTTP health)."""

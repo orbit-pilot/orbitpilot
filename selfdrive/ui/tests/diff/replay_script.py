@@ -336,8 +336,11 @@ def build_mici_script(pm: PubMaster, main_layout, script: Script) -> None:
     lambda: click(times=2, wait_after=FAST_CLICK),  # toggle UI debug mode
   ]
 
+  # Positional: one case per visible tile of SettingsLayoutSP (offroad); None skips the tile
   settings_cases: Cases = [
+    lambda: script.wait(WAIT_SHORT),  # orbit (just open and close)
     lambda: scroll_through_cases(toggle_cases),
+    None, None,  # sunnylink, models: their back_callback pops twice on swipe down, back to home
     lambda: scroll_through_cases(network_cases),
     lambda: scroll_through_cases(device_cases),
     lambda: script.wait(WAIT_SHORT),  # pairing
@@ -366,7 +369,7 @@ def build_mici_script(pm: PubMaster, main_layout, script: Script) -> None:
 
   # === Settings === #
   click()  # open settings
-  scroll_through_cases([lambda case=case: explore_setting(case) for case in settings_cases])  # explore settings
+  scroll_through_cases([(lambda case=case: explore_setting(case)) if case else None for case in settings_cases])  # explore settings
   swipe_down()  # back to home
 
   # === Onroad ===

@@ -20,17 +20,16 @@ EL SELECTOR DE MODO DE VOLANTE YA NO ESTA AQUI. Se movio a
 seccion 9 lo deja en el comma como control de primera linea y enterrarlo tras dos
 navegaciones era lo contrario.
 """
-import json
 import os
-import tempfile
 import time
 from collections.abc import Callable
 
 import pyray as rl
 
-from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import UnknownKeyName
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.widgets import orbit_ajustes as ajustes
+from openpilot.selfdrive.ui.widgets.orbit_ajustes import CONFIG_DEFAULTS
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.input_dialog import InputDialogSP
 from openpilot.selfdrive.ui.widgets.orbit_section import SectionHeaderSP
@@ -48,33 +47,10 @@ from openpilot.system.ui.widgets.network import NavButton
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 
 # Reexportados para quien todavia los importe desde aqui; la definicion vive en
-# steer_mode.py, que es donde esta el selector.
+# orbit_ajustes.py (la comparte el panel del comma 4).
 __all__ = ["AdvancedSettingsLayout", "MODE_NAMES", "TORQUE_STALE_SECONDS", "CONFIG_DEFAULTS"]
 
 PARAM_READ_INTERVAL_FRAMES = 30  # ~0.5s at 60fps
-
-# Default config values, mirror the old Qt defaults.
-CONFIG_DEFAULTS = {
-  "jetson_enabled": False,
-  "jetson_ip": "192.168.1.50",
-  "comma_ip": "127.0.0.1",
-  "jetson_img_port": 5555,
-  "jetson_torque_port": 5556,
-  "jpeg_quality": 80,
-}
-
-
-def _resolve_config_path() -> str:
-  """Resolve config_jetson.json, preferring BASEDIR with a /data/openpilot fallback."""
-  candidates = [
-    os.path.join(BASEDIR, "orbit", "config_jetson.json"),
-    "/data/openpilot/orbit/config_jetson.json",
-  ]
-  for path in candidates:
-    if os.path.exists(path):
-      return path
-  # Default to the BASEDIR location even if it does not exist yet (will be created).
-  return candidates[0]
 
 
 class AdvancedSettingsLayout(Widget):
@@ -83,7 +59,7 @@ class AdvancedSettingsLayout(Widget):
     self._back_button = NavButton(tr("Back"))
     self._back_button.set_click_callback(back_btn_callback)
 
-    self._config_path = _resolve_config_path()
+    self._config_path = ajustes.ruta_config_jetson()
     self._config: dict = {}
     self._load_config()
     self._config_mtime = self._current_mtime()
@@ -182,31 +158,10 @@ class AdvancedSettingsLayout(Widget):
     self._live_obstacle = self._read_live_param("JetsonObstaclePulse")
 
   def _torque_text(self) -> str:
-    if not self._live_torque:
-      return "-"
-    try:
-      # Sello de PARED porque asi lo escribe zmq_client (cruza barrera de proceso).
-      # time_ns y no time(): `time.time` esta prohibido por ruff en este arbol.
-      if not self._live_torque_ts or (time.time_ns() / 1e9) - float(self._live_torque_ts) > TORQUE_STALE_SECONDS:
-        return "-"
-      return f"{float(self._live_torque):+.2f}"
-    except (TypeError, ValueError):
-      return "-"
+    return ajustes.texto_torque(self._live_torque, self._live_torque_ts, time.time_ns() / 1e9)
 
   def _obstacle_yesno_text(self) -> str:
-    # JetsonObstaclePulse holds the last {"obstacle": bool, "intensity": float} JSON
-    if self._live_obstacle:
-      try:
-        payload = json.loads(self._live_obstacle)
-        if isinstance(payload, dict) and payload.get("obstacle"):
-          return tr("SI")
-      except ValueError:
-        pass
-    return tr("NO")
-
-  def _dongle_id(self) -> str | None:
-    dongle = ui_state.params.get("DongleId")
-    return dongle if dongle else None
+    return ajustes.texto_obstaculo(self._live_obstacle)
 
   # --------------------------------------------------------- jetson enabled
   def _on_jetson_enabled(self, enabled: bool):
@@ -226,57 +181,14 @@ class AdvancedSettingsLayout(Widget):
       return 0.0
 
   def _load_config(self):
-    self._config = dict(CONFIG_DEFAULTS)
-    try:
-      with open(self._config_path) as f:
-        data = json.load(f)
-      if isinstance(data, dict):
-        self._config.update(data)
-    except (OSError, ValueError):
-      pass
+    self._config = ajustes.cargar_config_jetson(self._config_path)
 
   def _save_config(self):
-    """Atomic write (tempfile + os.replace), bump _version, set JetsonConfigChanged, push MQTT payload."""
-    version_ms = time.time_ns() // 1_000_000
-    self._config["_version"] = str(version_ms)
-
-    directory = os.path.dirname(self._config_path)
-    try:
-      os.makedirs(directory, exist_ok=True)
-      fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
-      try:
-        with os.fdopen(fd, "w") as f:
-          json.dump(self._config, f, indent=4, sort_keys=True)
-        os.replace(tmp_path, self._config_path)
-      except Exception:
-        if os.path.exists(tmp_path):
-          os.remove(tmp_path)
-        raise
-    except OSError:
+    """Atomic write, bump _version, set JetsonConfigChanged, push MQTT payload (orbit_ajustes)."""
+    if not ajustes.guardar_config_jetson(self._config_path, self._config, ui_state.params):
       return
-
     # Record our own write so the live-reload check does not treat it as external.
     self._config_mtime = self._current_mtime()
-    ui_state.params.put_bool("JetsonConfigChanged", True)
-    self._write_config_payload(version_ms)
-
-  def _write_config_payload(self, version_ms: int):
-    dongle = self._dongle_id()
-    if not dongle:
-      return
-    payload = {
-      "dongle_id": dongle,
-      "jetson_enabled": bool(self._config.get("jetson_enabled", False)),
-      "jetson_ip": str(self._config.get("jetson_ip", "")),
-      "comma_ip": str(self._config.get("comma_ip", "")),
-      "jetson_img_port": int(self._config.get("jetson_img_port", 5555)),
-      "jetson_torque_port": int(self._config.get("jetson_torque_port", 5556)),
-      "jpeg_quality": int(self._config.get("jpeg_quality", 80)),
-      "source": "comma_ui",
-      "timestamp": str(time.time_ns() // 1_000_000),
-      "_version": str(version_ms),
-    }
-    ui_state.params.put("JetsonConfigMqttPayload", json.dumps(payload))
 
   def _edit_config_field(self, key: str, title: str, is_int: bool, clamp: tuple[int, int] | None = None,
                          step: int | None = None):
@@ -285,21 +197,10 @@ class AdvancedSettingsLayout(Widget):
     def on_input(result: DialogResult, text: str):
       if result != DialogResult.CONFIRM:
         return
-      text = text.strip()
-      if not text:
+      value = ajustes.parsear_campo(text, is_int, clamp, step)
+      if value is None:
         return
-      if is_int:
-        try:
-          value = int(text)
-        except ValueError:
-          return
-        if step:
-          value = int(round(value / step) * step)
-        if clamp:
-          value = max(clamp[0], min(clamp[1], value))
-        self._config[key] = value
-      else:
-        self._config[key] = text
+      self._config[key] = value
       self._save_config()
 
     dialog = InputDialogSP(title, current_text=current, min_text_size=1, callback=on_input)

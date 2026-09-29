@@ -24,7 +24,8 @@ import pyray as rl
 from openpilot.orbit import config_broker
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.input_dialog import InputDialogSP
-from openpilot.selfdrive.ui.widgets.orbit_server import probe_server, probe_backend, read_backend_port
+from openpilot.selfdrive.ui.widgets.orbit_ajustes import validar_host
+from openpilot.selfdrive.ui.widgets.orbit_server import probar_servidor
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets.confirm_dialog import alert_dialog
 from openpilot.system.ui.sunnypilot.widgets.list_view import button_item_sp
@@ -92,6 +93,13 @@ class ServerRows:
       text = text.strip()
       if not text:
         return
+      # Mismo validador que el comma 4: solo se rechaza lo claramente invalido (IPv4 fuera
+      # de rango, esquema, puerto pegado, espacios...). "1.2.3.4:1883" se guardaba entero
+      # como host y el broker no conectaba nunca.
+      error = validar_host(text)
+      if error:
+        gui_app.push_widget(alert_dialog(tr("Direccion del servidor no valida:") + f"\n{error}"))
+        return
       # Solo la key "broker": el resto (puerto, backend, credenciales) se preserva.
       # Un fallo de escritura se dice: antes se tragaba y la pantalla seguia
       # mostrando la IP vieja sin explicar por que.
@@ -110,8 +118,7 @@ class ServerRows:
     self._test_status = tr("Probando...")
 
     def _run():
-      broker_ok = probe_server(ip, port, timeout=3.0)
-      backend_ok = probe_backend(ip, read_backend_port(), timeout=3.0)
+      broker_ok, backend_ok = probar_servidor(ip, port, timeout=3.0)
       broker_msg = tr("Broker OK") if broker_ok else tr("Broker sin respuesta")
       backend_msg = tr("API OK") if backend_ok else tr("API sin respuesta")
       self._pending_test = f"{ip}:{port}\n{broker_msg} - {backend_msg}"
