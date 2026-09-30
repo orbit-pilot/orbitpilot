@@ -323,6 +323,11 @@ class MQTTEnvioGeneral:
     # panel, mantenemos un SubMaster minimo con carState: no se publica como
     # canal (enabled_items sigue vacio) pero alimenta el heartbeat de presencia.
     self.sm = messaging.SubMaster(self.lista_suscripciones or ["carState"])
+    # El SubMaster NUEVO cuenta sus recv_frame desde 0. Con los del anterior guardados,
+    # ningun canal v1 volvia a publicar hasta que el contador nuevo alcanzara al viejo:
+    # tocar un toggle de canal (el de privacidad escribe gpsLocation_toggle) callaba todo
+    # el camino v1 durante horas.
+    self._v1_frame = {}
 
   def init_mqtt(self):
     self.mqttc = mqtt.Client()
@@ -1239,9 +1244,12 @@ class MQTTEnvioGeneral:
         # y la publicacion v1 a 1 Hz, la mayoria de las llegadas caen en ticks que no
         # publican y el canal se habria quedado mudo. `recv_frame` responde la pregunta
         # que de verdad importa: ha llegado algo NUEVO desde la ultima vez que publique
-        # ESTE canal.
+        # ESTE canal. Y `seen` deja fuera lo que no ha llegado NUNCA: al arrancar, el
+        # SubMaster tiene recv_frame=0 y un mensaje TODO A CERO por servicio, y publicarlo
+        # machacaba en el backend la ultima posicion buena con (0,0) y la calibracion con
+        # "uncalibrated" en cada arranque (en un 3X gpsLocationExternal no llega jamas).
         frame = self.sm.recv_frame.get(nombre, 0)
-        if nombre in self.sm.data and frame > self._v1_frame.get(nombre, -1):
+        if self.sm.seen.get(nombre) and frame > self._v1_frame.get(nombre, -1):
           self._v1_frame[nombre] = frame
           datos = self.sm[nombre].to_dict()
           datos_filtrados = self.enviar_datos_importantes(nombre, datos)

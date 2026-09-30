@@ -332,7 +332,10 @@ CANAL_VEHICLE = Canal(
     Campo("yaw_rate_dps", "carState", "yawRate", "float", "deg/s", 1, RAD_A_DEG, defecto=0.0, desc="Velocidad de guinada"),
     Campo("steer_deg", "carState", "steeringAngleDeg", "float", "deg", 1, defecto=0.0, desc="Angulo de volante"),
     Campo("steer_rate_dps", "carState", "steeringRateDeg", "float", "deg/s", 1, defecto=0.0, perfil=PERFIL_DIAG, desc="Velocidad de giro del volante"),
-    Campo("steer_torque_driver", "carState", "steeringTorque", "float", "Nm", 1, defecto=0.0, perfil=PERFIL_DIAG, desc="Par que mete el conductor"),
+    # SIN defecto a proposito: hasta 2026-09 era de perfil diagnostico y un firmware anterior
+    # no lo manda nunca en normal. Si 0.0 se omitiera, la app no podria reconstruirlo sin
+    # inventarse un 0.0 para ese firmware viejo: asi viaja siempre y ausente = no se sabe.
+    Campo("steer_torque_driver", "carState", "steeringTorque", "float", "Nm", 1, desc="Par que mete el conductor"),
     Campo("gear", "carState", "gearShifter", "enum", desc="Posicion de la palanca"),
     # Los intermitentes son de las senales mas pedidas y hoy NO salen del coche: van en
     # carState, que se publica entero, pero el consumidor no los tenia documentados en
@@ -433,10 +436,13 @@ CANAL_PERCEPTION = Canal(
     Campo("bsm_right", "carState", "rightBlindspot", "bool", defecto=False, desc="Angulo muerto derecho ocupado"),
     Campo("lane_left_m", "drivingModelData", "laneLineMeta.leftY", "float", "m", 2, defecto=0.0, desc="Distancia a la linea izquierda"),
     Campo("lane_right_m", "drivingModelData", "laneLineMeta.rightY", "float", "m", 2, defecto=0.0, desc="Distancia a la linea derecha"),
+    # SIN defecto, como steer_torque_driver: eran de perfil diagnostico y un firmware anterior
+    # no las manda en normal. Con defecto, un 0 % (carretera sin lineas) no viajaria y la app
+    # no podria distinguirlo de "firmware viejo"; asi viajan siempre y ausente = no se sabe.
     Campo("lane_left_prob", "drivingModelData", "laneLineMeta.leftProb", "float", "", 2,
-          defecto=0.0, perfil=PERFIL_DIAG, desc="Confianza en la linea izquierda"),
+          desc="Confianza en la linea izquierda"),
     Campo("lane_right_prob", "drivingModelData", "laneLineMeta.rightProb", "float", "", 2,
-          defecto=0.0, perfil=PERFIL_DIAG, desc="Confianza en la linea derecha"),
+          desc="Confianza en la linea derecha"),
     Campo("lane_change", "drivingModelData", "meta.laneChangeState", "enum", defecto="off", desc="Estado del cambio de carril"),
     Campo("lane_change_dir", "drivingModelData", "meta.laneChangeDirection", "enum", defecto="none", desc="Sentido del cambio de carril"),
     Campo("a_target_ms2", "longitudinalPlan", "aTarget", "float", "m/s2", 2, defecto=0.0, desc="Aceleracion objetivo del plan"),
@@ -1283,6 +1289,12 @@ class MotorTelemetria:
     if gps is not None and not math.isinf(CANAL_POS.periodo(self.perfil)):
       crudo = self._pos_cruda(gps)
       datos = extraer(CANAL_POS, fuentes, self.perfil)
+      if not crudo["fix"] and crudo["lat"] == 0.0 and crudo["lon"] == 0.0:
+        # (0,0) sin fix no es una posicion: es lo que manda el receptor mientras no la tiene
+        # (el ublox del comma 4 en un garaje). Publicarlo pinta el coche en el golfo de
+        # Guinea. El keepalive sigue saliendo con fix=false: "vivo y sin posicion".
+        datos.pop("lat", None)
+        datos.pop("lon", None)
       if datos and self._pos_debida(CANAL_POS, ahora, crudo):
         if crudo["lat"] is not None and crudo["lon"] is not None:
           self._pos_ultima = (crudo["lat"], crudo["lon"], crudo["rumbo"])

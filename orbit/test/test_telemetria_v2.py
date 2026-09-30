@@ -244,6 +244,23 @@ def test_la_omision_por_defecto_es_LOSSLESS_reconstruyendo_con_el_descriptor():
   assert len(enviado) < len(completo), "la omision por defecto no esta ahorrando nada"
 
 
+def test_el_par_del_volante_a_cero_viaja_en_perfil_normal():
+  """Sin defecto a proposito: un firmware anterior (era de perfil diagnostico) no lo manda
+  nunca en normal, asi que la app no puede reconstruir un 0.0 omitido sin inventarselo.
+  Omitido, la fila 'Torque del volante' salia en '-' con el coche aparcado."""
+  cs = {"carState": lector("carState", steeringTorque=0.0)}
+  assert extraer(CANALES["vehicle"], cs, PERFIL_NORMAL)["steer_torque_driver"] == 0.0
+  assert "steer_torque_driver" not in extraer(CANALES["vehicle"], cs, PERFIL_AHORRO)
+
+
+def test_la_confianza_de_linea_a_cero_viaja_en_perfil_normal():
+  """Sin defecto, como el par: un 0 % (sin lineas) tiene que llegar como 0.0 y no como
+  ausente, que la app pinta como '-' (sin dato)."""
+  dm = {"drivingModelData": lector("drivingModelData", **{"laneLineMeta.leftProb": 0.0, "laneLineMeta.rightProb": 0.0})}
+  d = extraer(CANALES["perception"], dm, PERFIL_NORMAL)
+  assert (d["lane_left_prob"], d["lane_right_prob"]) == (0.0, 0.0)
+
+
 def test_los_intermitentes_salen_del_coche():
   """Es de las senales mas pedidas y hoy no sale del coche con un contrato propio."""
   motor = MotorTelemetria()
@@ -377,6 +394,44 @@ def test_sin_fix_no_se_publica_traza_salvo_keepalive():
   motor.tick(10.0, fuentes_minimas(gpsLocationExternal=_gps(40.0, -3.0)), ts_ms=1)
   sin_fix = fuentes_minimas(gpsLocationExternal=_gps(41.0, -3.0, fix=False))
   assert "pos" not in solo_datos(motor.tick(15.0, sin_fix, ts_ms=2))
+
+
+def test_sin_fix_el_0_0_del_receptor_no_viaja_como_posicion():
+  """El ublox del comma 4 sin fix manda lat=lon=0: eso no es una posicion."""
+  motor = MotorTelemetria()
+  d = solo_datos(motor.tick(10.0, fuentes_minimas(gpsLocationExternal=_gps(0.0, 0.0, fix=False)), ts_ms=1))["pos"]
+  assert "lat" not in d and "lon" not in d and d["fix"] is False   # sale como "vivo y sin posicion"
+  # Al recuperar el fix la posicion sale en el siguiente periodo, sin esperar al keepalive.
+  d = solo_datos(motor.tick(11.0, fuentes_minimas(gpsLocationExternal=_gps(40.0, -3.0)), ts_ms=2))["pos"]
+  assert d["lat"] == 40.0
+  # Sin fix pero con una posicion real (la ultima que conoce el modem) si viaja.
+  d = solo_datos(MotorTelemetria().tick(10.0, fuentes_minimas(gpsLocationExternal=_gps(40.0, -3.0, fix=False)), ts_ms=1))["pos"]
+  assert d["lat"] == 40.0 and d["fix"] is False
+
+
+def test_qcomgpsd_da_los_satelites_solo_si_cuadran_y_caben_en_el_Int8():
+  """El 3X (qcomgpsd) no rellenaba satelliteCount y `sats` no llegaba nunca a la app.
+
+  Pasa por el desempaquetado REAL de position_report: una clave mal escrita en el helper
+  tumbaria qcomgpsd en cada fix (el bucle de main() no tiene try)."""
+  import struct
+  from openpilot.system.qcomgpsd.qcomgpsd import satelites_en_solucion
+  from openpilot.system.qcomgpsd.structs import dict_unpacker, parse_struct, position_report
+  fmt, nombres = parse_struct(position_report)
+  desempaqueta, _ = dict_unpacker(position_report)
+
+  def sats(gps, glo, bds):
+    campos = dict.fromkeys(nombres, 0)
+    for c, (usados, vistos) in zip(("Gps", "Glo", "Bds"), (gps, glo, bds), strict=True):
+      campos[f"u_Num{c}SvsUsed"], campos[f"u_Total{c}Svs"] = usados, vistos
+    return satelites_en_solucion(desempaqueta(struct.pack(fmt, *(campos[n] for n in nombres))))
+
+  assert sats((9, 12), (6, 8), (7, 15)) == 22
+  assert sats((13, 12), (6, 8), (7, 15)) == 0            # usados > vistos: dato u offset roto
+  assert sats((100, 200), (20, 30), (10, 20)) == 0       # 130 no cabe en satelliteCount (Int8)
+  msg = messaging.new_message("gpsLocation")
+  msg.gpsLocation.satelliteCount = sats((60, 60), (60, 60), (7, 7))   # 127, el tope exacto
+  assert msg.gpsLocation.satelliteCount == 127
 
 
 def test_sin_fuente_de_posicion_el_canal_pos_no_existe():
@@ -549,8 +604,11 @@ class _SubMasterFalso:
     self.data = datos
     self.alive = dict.fromkeys(datos, True)
     # `recv_frame` es lo que mira el camino v1 para saber si llego algo NUEVO desde su
-    # ultima publicacion (el tick va a 4 Hz y v1 publica a 1 Hz).
+    # ultima publicacion (el tick va a 4 Hz y v1 publica a 1 Hz). Todo lo de `datos` cuenta
+    # como llegado; el arranque de verdad (recv_frame=0, seen=False) lo prueba el SubMaster
+    # real en test_v1_no_publica_el_mensaje_CERO_de_un_servicio_que_nunca_llego.
     self.recv_frame = dict.fromkeys(datos, 1)
+    self.seen = dict.fromkeys(datos, True)
 
   def __getitem__(self, k):
     return self.data[k]
@@ -928,6 +986,16 @@ def test_la_lista_blanca_v1_lleva_las_senales_de_cabina_que_lee_la_app():
     assert k in claves, f"carState.{k} lo lee la app y la lista blanca v1 lo tira"
 
 
+def test_la_lista_blanca_v1_de_gps_lleva_hasFix():
+  """El backend (`guardar_parcial`) y la app (`_legadoPos`) no toman la posicion v1 de un mensaje
+  con `hasFix` false: el modem del 3X publica coordenadas antes del fix, a kilometros del coche,
+  y la ficha y el listado prefieren la columna v1 a la ultima posicion v2. Sin `hasFix` en la
+  lista blanca esas guardas no ven nada y el punto malo pasa."""
+  blanca = _lista_blanca_v1()
+  for canal in ("gpsLocation", "gpsLocationExternal"):
+    assert "hasFix" in blanca[canal], f"{canal}: sin hasFix se guardan posiciones sin fix"
+
+
 def test_el_grupo_deprecated_NO_entra_en_la_lista_blanca_v1():
   """Guardia contra "arreglar" el banner de alerta metiendo el grupo entero.
 
@@ -966,6 +1034,53 @@ def test_el_interruptor_de_privacidad_calla_los_canales_v1_de_posicion():
   assert not any("gpsLocation" in t for t in topics), \
     "con OrbitPrivacyMute puesto el camino v1 seguia publicando la posicion"
   assert any(t.endswith("/carState") for t in topics), "el mute es de POSICION, no de todo"
+
+
+# ------------------------------------------------------- A4: v1 publica solo lo que ha llegado
+
+def _llega(sm, servicio, **campos):
+  """Entrega un mensaje al SubMaster DE VERDAD por la misma puerta que usa update()."""
+  msg = messaging.new_message(servicio)
+  cuerpo = getattr(msg, servicio)
+  for k, v in campos.items():
+    setattr(cuerpo, k, v)
+  sm.update_msgs(time.monotonic(), [msg.as_reader()])
+
+
+def _canales_v1_publicados(e):
+  canales = {c["canal"] for c in e.enabled_items}
+  return [t.rsplit("/", 1)[1] for t, *_ in e.mqttc.publicado if t.rsplit("/", 1)[1] in canales]
+
+
+def test_v1_no_publica_el_mensaje_CERO_de_un_servicio_que_nunca_llego():
+  """Al arrancar, el SubMaster de verdad tiene recv_frame=0 y un mensaje TODO A CERO por
+  servicio. El camino v1 lo publicaba: en un 3X gpsLocationExternal no llega nunca, y cada
+  arranque machacaba en el backend la ultima posicion buena con (0,0)."""
+  canales = ["gpsLocation", "gpsLocationExternal", "carState"]
+  e = _emisor_v1(canales)
+  e.sm = messaging.SubMaster(canales)        # el de verdad y sin publicador: nada ha llegado
+  assert e.sm.recv_frame["gpsLocationExternal"] == 0 and not e.sm.seen["gpsLocationExternal"]
+  e._ciclo_v1()
+  assert _canales_v1_publicados(e) == []
+
+  _llega(e.sm, "gpsLocation", latitude=40.1, longitude=-3.1)
+  e._ciclo_v1()
+  e._ciclo_v1()                              # sin nada nuevo no se repite
+  assert _canales_v1_publicados(e) == ["gpsLocation"]
+  cuerpo = json.loads(next(p for t, p, *_ in e.mqttc.publicado if t.endswith("/gpsLocation")))
+  assert cuerpo["latitude"] == pytest.approx(40.1)
+
+
+def test_recrear_el_SubMaster_no_deja_mudo_el_camino_v1():
+  """Tocar un toggle de canal recrea el SubMaster y sus recv_frame vuelven a empezar en 0.
+  Con los del SubMaster anterior guardados, el v1 se callaba hasta alcanzarlos."""
+  e = _emisor_v1(["carState"])
+  e.lista_suscripciones = ["carState"]
+  e._v1_frame = {"carState": 5000}           # lo publicado con el SubMaster anterior
+  e.init_submaster()
+  _llega(e.sm, "carState", vEgo=3.0)         # frame 0 del SubMaster nuevo
+  e._ciclo_v1()
+  assert _canales_v1_publicados(e) == ["carState"]
 
 
 def test_el_cableado_del_spool_funciona_contra_el_Spool_DE_VERDAD(tmp_path):

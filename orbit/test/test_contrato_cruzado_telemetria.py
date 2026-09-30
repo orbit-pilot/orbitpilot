@@ -44,7 +44,7 @@ _CANDIDATOS = (
 
 # Firma del descriptor del coche. Si cambia el contrato, este valor cambia Y hay que
 # reconciliar los otros dos repos en el mismo commit. Es el trinquete.
-FIRMA_ESPERADA = "e9c45ff5314cd755"
+FIRMA_ESPERADA = "0410ffd4105d9cf0"
 
 # Un `enum` del coche viaja como cadena JSON, asi que el backend puede declararlo `str`.
 # Cualquier otra pareja es una divergencia real: un `int` no puede recibir un `enum`.

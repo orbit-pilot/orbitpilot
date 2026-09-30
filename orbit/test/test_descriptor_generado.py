@@ -20,7 +20,11 @@ import pytest
 from openpilot.orbit.gen_descriptor_backend import convertir
 from openpilot.orbit.telemetria_v1 import firma_telemetria
 
-RUTA_IOV = "/home/drago/Escritorio/PROYECTS/APPS/orbit-iov/backend/schema/telemetry_v2.json"
+# Misma variable que el test de contrato cruzado: con la ruta fija este test se SALTABA
+# en cualquier maquina donde el repo companero no vive en esa carpeta, y nadie comprobaba
+# que el fichero del backend se hubiera regenerado.
+RUTA_IOV = os.path.join(os.environ.get("ORBIT_IOV", "/home/drago/Escritorio/PROYECTS/APPS/orbit-iov"),
+                        "backend", "schema", "telemetry_v2.json")
 
 pytestmark = pytest.mark.skipif(
   not os.path.exists(RUTA_IOV),

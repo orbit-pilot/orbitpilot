@@ -81,6 +81,23 @@ measurementStatusGlonassFields = {
   "glonassTimeMarkValid": 17
 }
 
+def satelites_en_solucion(report: dict) -> int:
+  """ORBIT: satelites usados en el fix (GPS + GLONASS + BeiDou) para gpsLocation.satelliteCount.
+
+  Upstream nunca ha leido estos campos: van en la cola de position_report, detras de los dos
+  rellenos de alineacion puestos a mano, y ningun dato real ha confirmado su offset. Por eso
+  la cifra solo sale si cuadra por dentro (usados <= detectados en cada constelacion); si no,
+  0 = "no disponible", lo mismo que se publicaba antes. El tope de 127 no es cosmetico:
+  satelliteCount es Int8, un valor mayor lanza KjException y el bucle de main() no tiene try.
+  Ningun consumidor del arbol lee satelliteCount de gpsLocation (solo la telemetria ORBIT,
+  canal pos.sats), asi que rellenarlo no cambia el comportamiento de nadie mas.
+  """
+  usados = [report[f"u_Num{c}SvsUsed"] for c in ("Gps", "Glo", "Bds")]
+  vistos = [report[f"u_Total{c}Svs"] for c in ("Gps", "Glo", "Bds")]
+  if any(u > v for u, v in zip(usados, vistos, strict=True)) or sum(usados) > 127:
+    return 0
+  return sum(usados)
+
 @retry(attempts=10, delay=1.0)
 def try_setup_logs(diag, logs):
   return setup_logs(diag, logs)
@@ -312,6 +329,11 @@ def main() -> NoReturn:
       gps.speedAccuracy = math.sqrt(sum([x**2 for x in vNEDsigma]))
       # quectel gps verticalAccuracy is clipped to 500, set invalid if so
       gps.hasFix = gps.verticalAccuracy != 500
+      # ORBIT: horizontalAccuracy se deja a 0 A PROPOSITO. locationd_llk (sunnypilot) lo mete
+      # en su puerta hypot(horizontalAccuracy, verticalAccuracy) >= 1500 m, que hoy con 0 solo
+      # depende del Vdop; rellenarlo con el semieje del elipse podria rechazar fixes que hoy
+      # acepta, y de liveLocationKalman cuelgan LastGPSPosition, mapd y los limites de via.
+      gps.satelliteCount = satelites_en_solucion(report)
       pm.send('gpsLocation', msg)
 
     elif log_type == LOG_GNSS_OEMDRE_SVPOLY_REPORT:
