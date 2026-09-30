@@ -421,6 +421,9 @@ def test_presupuesto_de_ritmo_de_cruise_delta():
     aceptados += int(res.aceptado)
     if not res.aceptado:
       assert res.reason == "RANGE"
+      # La app distingue este RANGE por la palabra (command_bus.dart): "demasiados cambios
+      # seguidos; espera un momento" en vez de "argumentos fuera de rango".
+      assert "presupuesto" in res.detail
   assert aceptados == 4   # 4 x 5 km/h = el presupuesto de 20 km/h por minuto
 
 

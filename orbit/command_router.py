@@ -790,8 +790,12 @@ class CommandRouter:
   # no contesto. El consumidor decide en su propio ciclo (desire_helper corre a 20 Hz
   # dentro de modeld), asi que el TTL pelado se quedaria corto por unos milisegundos.
   MARGEN_RESULTADO_S = 2.0
-  # Cadencia del sondeo. Solo se lee el disco si hay algo pendiente.
+  # Cadencia del sondeo. Solo se lee el disco si hay algo pendiente, y entonces a 50 Hz: la
+  # app solo pinta una fase intermedia si dura 700 ms (kRetencionIntermedia), y los 0-100 ms
+  # que anadia el sondeo a 10 Hz eran margen que ya no quedaba para el jitter de red antes
+  # de que "En curso" asomara entre "Enviando" y "Hecho". En reposo no se toca el disco.
   PERIODO_RESULTADO_S = 0.1
+  PERIODO_RESULTADO_PENDIENTE_S = 0.02
   # Plazo que se concede a una maniobra YA EMPEZADA para terminar. En cuanto el consumidor
   # anuncia una fase intermedia (executing: "maniobra iniciada") la orden deja de estar
   # limitada por el TTL del sobre -- el TTL dice cuanto vale la orden EN VUELO, no cuanto
@@ -849,6 +853,7 @@ class CommandRouter:
     siempre: el escritor de OrbitCmdResult existia y NO tenia lector.
     """
     while not self._stop.is_set():
+      hay = False
       try:
         with self._lock:
           hay = bool(self._pendientes)
@@ -859,7 +864,7 @@ class CommandRouter:
           self._caducar_pendientes()
       except Exception:
         cloudlog.exception("[Orbit] bucle de resultados")
-      self._stop.wait(self.PERIODO_RESULTADO_S)
+      self._stop.wait(self.PERIODO_RESULTADO_PENDIENTE_S if hay else self.PERIODO_RESULTADO_S)
 
   def _correlacionar_pendiente(self, cmd_id: str, verbo: str) -> str | None:
     """Clave del pendiente al que pertenece un veredicto. Se llama CON el lock cogido.
@@ -868,9 +873,11 @@ class CommandRouter:
     caducado) NO se correlaciona por verbo, porque seria cerrar nuestra orden con el
     veredicto de otra. SIN `id` se correlaciona por verbo con el pendiente mas antiguo de
     ese verbo: es el caso real del consumidor que leyo el flag antes de ver el cmdId en el
-    plano de estado (desire_helper corre a 20 Hz y el plano publica a 10 Hz), y con un solo
-    pendiente por verbo -- los verbos que cierra un consumidor no se encadenan -- no hay
-    ambiguedad que resolver.
+    plano de estado (desire_helper corre a 20 Hz y el plano publica a 10 Hz), y el de
+    cruise_delta, que firma siempre sin id (spec.conserva_plano). lane_change no se
+    encadena; cruise_delta si puede tener dos pulsaciones pendientes (dos moviles: la app no
+    manda la segunda hasta cerrar la primera), y su consumidor las decide en el orden en que
+    llegaron sus flags: con el mismo TTL, el limite mas cercano es el pendiente mas antiguo.
     """
     if cmd_id:
       return cmd_id if cmd_id in self._pendientes else None
@@ -884,9 +891,10 @@ class CommandRouter:
   def _liberar_plano(self, cmd_id: str) -> None:
     """Cierra en el plano de estado el comando `cmd_id` SI sigue siendo el activo.
 
-    Los verbos que cierra un consumidor conservan activeVerb/cmdId en el plano hasta que
+    Los verbos con spec.conserva_plano mantienen activeVerb/cmdId en el plano hasta que
     llega su veredicto (o vence el margen): es de ahi de donde el consumidor lee el id con
     el que firma. Si mientras tanto empezo otro comando, el plano ya es suyo y no se toca.
+    Para los demas es un no-op: su handler ya cerro el plano al retornar.
     """
     if self.store is None:
       return
@@ -1079,11 +1087,13 @@ class CommandRouter:
           # La ventana se cerro entera: el siguiente verbo que arme actuador abre la suya
           # completa y no queda recortado por el deadline de un verbo ya desarmado.
           self._ventana_verb = ""
-        elif not cierra_consumidor:
+        elif not (cierra_consumidor and getattr(spec, "conserva_plano", False)):
           self.store.end_command()
-        # Los verbos que cierra un consumidor CONSERVAN activeVerb/cmdId en el plano: el
-        # consumidor firma su veredicto con ese id (desire_helper._orbit_consumir_flag) y
-        # con el borrado inmediato el veredicto llegaba sin id y acababa en NO_RESULT. Lo
-        # cierra _liberar_plano al llegar el veredicto o al vencer el margen.
+        # Los verbos con conserva_plano (lane_change) MANTIENEN activeVerb/cmdId en el
+        # plano: el consumidor firma su veredicto con ese id (desire_helper.
+        # _orbit_consumir_flag) y con el borrado inmediato el veredicto llegaba sin id y
+        # acababa en NO_RESULT. Lo cierra _liberar_plano al llegar el veredicto o al vencer
+        # el margen. cruise_delta NO: mientras el plano anuncia un verbo, controlsd ve BUSY
+        # en cada ciclo de un assisted_decel en marcha y lo suelta a neutro.
       except Exception:
         pass

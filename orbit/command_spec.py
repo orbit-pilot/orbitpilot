@@ -221,13 +221,24 @@ class CommandSpec:
   arma_actuador: bool = True
   # Verbo cuyo RESULTADO REAL lo decide un consumidor en otro proceso, no el handler.
   #
-  # El handler solo escribe un Param; quien decide de verdad es desire_helper (que puede
-  # rechazar un cambio de carril por nueve motivos propios: velocidad, latActive, angulo
-  # muerto, pedales, cinturon...). Anunciar `applied` en cuanto el handler retorna es
-  # anunciar "hecho" cuando lo unico cierto es que hay un flag en disco. Para estos verbos
-  # el router se queda esperando a OrbitCmdResult y cierra el ACK con lo que diga el
-  # consumidor, o con NO_RESULT si no contesta a tiempo.
+  # El handler solo escribe un Param; quien decide de verdad es el consumidor: desire_helper
+  # para lane_change (que puede rechazar un cambio de carril por nueve motivos propios:
+  # velocidad, latActive, angulo muerto, pedales, cinturon...) y card para cruise_delta
+  # (gates del ciclo, topes y su propio presupuesto por minuto). Anunciar `applied` en
+  # cuanto el handler retorna es anunciar "hecho" cuando lo unico cierto es que hay un flag
+  # en disco. Para estos verbos el router se queda esperando a OrbitCmdResult y cierra el
+  # ACK con lo que diga el consumidor, o con NO_RESULT si no contesta a tiempo.
   cierra_consumidor: bool = False
+  # Solo con cierra_consumidor: el router CONSERVA activeVerb/cmdId en el plano de estado
+  # hasta el veredicto, porque el consumidor firma con el cmdId que lee de ahi.
+  #
+  # No es gratis: mientras el plano anuncia un verbo, allows() da BUSY a cualquier otro
+  # (OrbitAuthority.busy_with_other), y controlsd lo reevalua en CADA ciclo de un
+  # assisted_decel en marcha. Por eso solo lo pide lane_change, que lo suelta en cuanto
+  # desire_helper anuncia la maniobra. cruise_delta firma sin id y el router lo
+  # correlaciona por verbo: conservarlo cortaba en seco una deceleracion asistida en curso
+  # con cada pulsacion de +/-.
+  conserva_plano: bool = False
 
   @property
   def requiere_armado_banco(self) -> bool:
@@ -346,6 +357,12 @@ COMMANDS: MappingProxyType = MappingProxyType({spec.verb: spec for spec in (
     limits=_limits(rate={"campo": "delta_kph", "presupuesto": 20.0, "ventana_s": 60.0}),
     handler_name="handle_cruise_delta",
     descripcion="Sube o baja la velocidad de crucero. Unifica los cuatro caminos actuales (speed_up, speed_down, control, speed).",
+    # El handler solo deja orbit_speed_increase/decrease en disco; quien mueve (o no) la
+    # consigna es el consumidor de card (orbit_speed_ultra_simple). Medido en el coche: 17
+    # de 78 `applied` no movieron la consigna, porque el ACK salia al escribir el flag y el
+    # rechazo del consumidor solo llegaba al log. El ACK lo cierra su veredicto, que va sin
+    # id: sin conserva_plano, a proposito (ver el campo).
+    cierra_consumidor=True,
   ),
   CommandSpec(
     verb="cruise_button",
@@ -442,8 +459,10 @@ COMMANDS: MappingProxyType = MappingProxyType({spec.verb: spec for spec in (
     handler_name="handle_lane_change",
     descripcion="Un unico cambio de carril. No se encadena: una maniobra por orden.",
     # El handler solo arma ForceLaneChange*; quien acepta o rechaza es desire_helper, que
-    # aplica sus propios gates en el ciclo en que actua. El ACK lo cierra su resultado.
+    # aplica sus propios gates en el ciclo en que actua. El ACK lo cierra su resultado,
+    # firmado con el cmdId que lee del plano.
     cierra_consumidor=True,
+    conserva_plano=True,
   ),
   CommandSpec(
     verb="assisted_decel",

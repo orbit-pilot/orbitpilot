@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import json
 import os
 import time
 import threading
+from collections import deque
 
 import cereal.messaging as messaging
 
@@ -201,6 +203,11 @@ class Car:
     self._orbit_speed_mod = None      # modulo orbit_speed_ultra_simple, cacheado
     self._orbit_speed_roto = False    # el import fallo: no reintentarlo en cada ciclo
     self._orbit_ultimo_error_mono = 0.0
+    # Veredictos de cruise_delta: los encola state_update y los escribe params_thread, al
+    # que se despierta en cuanto hay uno (sin esperar a su siguiente vuelta de 100 ms).
+    self._orbit_veredictos = deque(maxlen=8)
+    self._orbit_despertar = threading.Event()
+    self._orbit_aviso_veredicto = False
 
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
@@ -260,6 +267,64 @@ class Car:
     mod.orbit_speed_increase = bool(subir)
     mod.orbit_speed_decrease = bool(bajar)
 
+  def _orbit_publicar_veredicto(self) -> None:
+    """Escribe en OrbitCmdResult el veredicto de cruise_delta que encolo state_update.
+
+    Aqui y no en el bucle de 100 Hz por lo mismo que los flags: es disco. put() sin block
+    solo encola en el hilo de escritura de Params, asi que este hilo no espera a un fsync
+    (que puede pasar del segundo) antes de leer el siguiente flag. La clave es STRING: va
+    el JSON como str, nunca el dict (put() lanza TypeError con un tipo que no es el suyo).
+
+    UNO por vuelta y SOLO con el hueco vacio: OrbitCmdResult es un solo hueco que el router
+    lee y borra (cada 20 ms mientras espera) y que tambien escribe desire_helper. Escribir
+    encima de un veredicto sin leer lo perdia, y su orden acababa en NO_RESULT con la
+    consigna ya movida; esperando, sale en la vuelta siguiente. Se saca de la cola ANTES de
+    escribir: si put() falla, ese veredicto se pierde (NO_RESULT, que es honesto) en vez de
+    reintentarse y acabar, ya rancio, cerrando por verbo una pulsacion posterior.
+    """
+    if not self._orbit_veredictos or self.params.get("OrbitCmdResult"):
+      return
+    veredicto = self._orbit_veredictos.popleft()
+    self.params.put("OrbitCmdResult", json.dumps(veredicto, separators=(",", ":")))
+
+  def _orbit_cruise_delta(self, CS: car.CarState) -> None:
+    """[Orbit] VERBO `cruise_delta` (seccion 6): sube o baja la consigna de crucero por orden
+    remota. Vive aqui porque VCruiseHelper se movio a card.py.
+
+    QUE CAMBIA RESPECTO A LO ANTERIOR
+     * Los flags ya no se leen ni se limpian AQUI: eran cuatro accesos a /data/params por
+       ciclo (dos get_bool + dos put_bool) dentro de un bucle a 100 Hz en SCHED_FIFO sobre
+       el core 4. Ahora los atiende params_thread, que corre a 10 Hz y a SCHED_OTHER.
+     * Se pasa el carControl REAL en vez de un objeto falso con solo `longActive`. El
+       consumidor v2 tambien mira `enabled`, y un objeto sin ese atributo lo daba por
+       False: el verbo habria quedado rechazado SIEMPRE con GATE_ENGAGED.
+     * Hace falta autoridad viva del plano de estado (modo copiloto, gates ENGAGED y
+       LONG_ACTIVE y deadman sin vencer). El propio modulo reevalua los gates con este
+       carControl y este carState, en el ciclo en que actua.
+     * El veredicto (aplicada, o rechazada con su motivo) se ENCOLA y lo escribe
+       params_thread: el router cierra el ACK con el. Antes el ACK decia `applied` en cuanto
+       habia un flag en disco y el rechazo solo llegaba a este log.
+    """
+    try:
+      self._orbit_poll()
+      mod = self._orbit_speed_module()
+      if mod is not None and (mod.orbit_speed_increase or mod.orbit_speed_decrease):
+        consumidor = mod.orbit_speed_ultra_simple
+        motivo = consumidor.process_speed_commands(
+          self.sm['carControl'], CS, self.v_cruise_helper,
+          autoridad=self._orbit_auth, now_mono=self._orbit_now_mono)
+        if motivo:
+          self._orbit_veredictos.append(consumidor.veredicto(motivo, self._orbit_now_mono))
+          self._orbit_despertar.set()
+        if motivo not in ("", "OK"):
+          cloudlog.warning(f"card: [Orbit] cruise_delta rechazado: {motivo}")
+    except Exception:
+      # Acotado en el tiempo: esto corre a 100 Hz y una excepcion que se repita cada ciclo
+      # convertiria el hilo de card en un generador de swaglog.
+      if (self._orbit_now_mono - self._orbit_ultimo_error_mono) > 5.0:
+        self._orbit_ultimo_error_mono = self._orbit_now_mono
+        cloudlog.exception("card: [Orbit] excepcion en cruise_delta (ignorada: no puede tocar el control)")
+
   def state_update(self) -> tuple[car.CarState, custom.CarStateSP, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
 
@@ -290,34 +355,8 @@ class Car:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode, self.dynamic_experimental_control)
 
-    # [Orbit] VERBO `cruise_delta` (seccion 6): sube o baja la consigna de crucero por orden
-    # remota. Vive aqui porque VCruiseHelper se movio a card.py.
-    #
-    # QUE CAMBIA RESPECTO A LO ANTERIOR
-    #  * Los flags ya no se leen ni se limpian AQUI: eran cuatro accesos a /data/params por
-    #    ciclo (dos get_bool + dos put_bool) dentro de un bucle a 100 Hz en SCHED_FIFO sobre
-    #    el core 4. Ahora los atiende params_thread, que corre a 10 Hz y a SCHED_OTHER.
-    #  * Se pasa el carControl REAL en vez de un objeto falso con solo `longActive`. El
-    #    consumidor v2 tambien mira `enabled`, y un objeto sin ese atributo lo daba por
-    #    False: el verbo habria quedado rechazado SIEMPRE con GATE_ENGAGED.
-    #  * Hace falta autoridad viva del plano de estado (modo copiloto, gates ENGAGED y
-    #    LONG_ACTIVE y deadman sin vencer). El propio modulo reevalua los gates con este
-    #    carControl y este carState, en el ciclo en que actua.
-    try:
-      self._orbit_poll()
-      mod = self._orbit_speed_module()
-      if mod is not None and (mod.orbit_speed_increase or mod.orbit_speed_decrease):
-        motivo = mod.orbit_speed_ultra_simple.process_speed_commands(
-          self.sm['carControl'], CS, self.v_cruise_helper,
-          autoridad=self._orbit_auth, now_mono=self._orbit_now_mono)
-        if motivo not in ("", "OK"):
-          cloudlog.warning(f"card: [Orbit] cruise_delta rechazado: {motivo}")
-    except Exception:
-      # Acotado en el tiempo: esto corre a 100 Hz y una excepcion que se repita cada ciclo
-      # convertiria el hilo de card en un generador de swaglog.
-      if (self._orbit_now_mono - self._orbit_ultimo_error_mono) > 5.0:
-        self._orbit_ultimo_error_mono = self._orbit_now_mono
-        cloudlog.exception("card: [Orbit] excepcion en cruise_delta (ignorada: no puede tocar el control)")
+    # [Orbit] VERBO `cruise_delta`: ver _orbit_cruise_delta.
+    self._orbit_cruise_delta(CS)
 
     # TODO: mirror the carState.cruiseState struct?
     CS.vCruise = float(self.v_cruise_helper.v_cruise_kph)
@@ -418,8 +457,21 @@ class Car:
         self._orbit_leer_flags_velocidad()
       except Exception:
         pass
+      # [Orbit] Veredicto de cruise_delta hacia el router. Try propio: si fallara la
+      # escritura, los flags se tienen que seguir consumiendo igual.
+      try:
+        self._orbit_publicar_veredicto()
+      except Exception:
+        if not self._orbit_aviso_veredicto:
+          self._orbit_aviso_veredicto = True
+          cloudlog.exception("card: [Orbit] no se pudo escribir OrbitCmdResult: cruise_delta cerrara con NO_RESULT")
 
-      time.sleep(0.1)
+      # 0.1 s, o menos si state_update encola un veredicto: esperar a la vuelta siguiente
+      # sumaba hasta 100 ms entre `executing` y `applied`, y la app solo pinta una fase
+      # intermedia si dura 700 ms (kRetencionIntermedia): cada ms de aqui es margen que se
+      # come el jitter de red antes de que asome "En curso" entre "Enviando" y "Hecho".
+      if self._orbit_despertar.wait(0.1):
+        self._orbit_despertar.clear()
 
   def card_thread(self):
     e = threading.Event()

@@ -20,11 +20,15 @@ QUE CAMBIO Y POR QUE
   60 s con 20 km/h de presupuesto, medida en reloj MONOTONO.
 - Antes no habia ninguna nocion de autoridad: los flags eran suficientes. Ahora hace
   falta la ventana viva del plano de estado (deadman, seccion 5).
+- Antes el ACK decia `applied` en cuanto el router escribia el flag, y el rechazo de este
+  modulo solo llegaba al log de card: 17 de 78 `applied` medidos en el coche no movieron
+  la consigna. Ahora el veredicto (veredicto()) viaja al router por OrbitCmdResult y es el
+  que cierra el ACK, igual que el de desire_helper para lane_change.
 """
 import time
 
 from openpilot.common.params import Params
-from openpilot.orbit.command_spec import Gate, Mode
+from openpilot.orbit.command_spec import CONTRACT_VERSION, Gate, Mode, Phase, ahora_epoch_ms
 
 try:
   from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_MIN, V_CRUISE_UNSET
@@ -44,6 +48,10 @@ DELTA_MAX_KPH = 5.0            # por orden
 PRESUPUESTO_KPH = 20.0         # por ventana
 VENTANA_S = 60.0
 
+# Cuanto se espera, como mucho, a que el plano de estado publique la ventana de la orden
+# cuyo flag ya se leyo (ver process_speed_commands). Tres ticks del plano, que va a 10 Hz.
+ESPERA_PLANO_S = 0.3
+
 
 class OrbitSpeedUltraSimple:
   """Aplica cruise_delta sobre VCruiseHelper con limite por orden y por minuto."""
@@ -55,6 +63,8 @@ class OrbitSpeedUltraSimple:
     # Presupuesto: lista de (instante_monotono, kph_gastados) dentro de la ventana.
     self._gasto = []
     self._ultimo_motivo = ""
+    self._flag_desde = None      # instante MONOTONO en que se vio el flag pendiente
+    self._detalle = ""
 
   def get_speed_increment(self):
     """Incremento por orden, acotado al contrato (+-5 km/h).
@@ -78,7 +88,8 @@ class OrbitSpeedUltraSimple:
 
   def process_speed_commands(self, car_control, car_state, v_cruise_helper,
                              autoridad=None, now_mono: float | None = None) -> str:
-    """Procesa un cruise_delta pendiente. Devuelve el motivo (codigo de la seccion 3.3).
+    """Procesa un cruise_delta pendiente. Devuelve el motivo (codigo de la seccion 3.3), o
+    "" si todavia no hay nada decidido (sin flag, o esperando al plano).
 
     `autoridad` es el OrbitAuthority del ciclo (orbit_control_ultra_simple). Sin el no se
     mueve nada: el plano de estado es quien dice que hay una orden viva y en que modo.
@@ -88,7 +99,25 @@ class OrbitSpeedUltraSimple:
     now_mono = time.monotonic() if now_mono is None else now_mono
     pendiente = bool(orbit_speed_increase) or bool(orbit_speed_decrease)
     if not pendiente:
+      self._flag_desde = None
       return ""
+
+    # ESPERA AL PLANO. El flag (Params, leido a 10 Hz) y el plano de estado (cereal, 10 Hz)
+    # llegan por caminos distintos, y el flag puede adelantarse a la foto que trae la
+    # ventana de SU orden. Decidir con la foto anterior, con la ventana de la orden previa
+    # ya cerrada, daba EXPIRED y la consigna no se movia. Medido en el coche: los 17
+    # `applied` mudos de 78 llegaron sin otra orden en los 2 s previos (1 de cada 4 de
+    # esas), y ninguna de las 13 que llegaron con esa ventana abierta. Se espera a ver la
+    # ventana abierta, como mucho ESPERA_PLANO_S, y pasado ese plazo se decide igual con lo
+    # que haya: la ventana solo dice CUANDO decidir, el permiso sigue siendo entero de
+    # allows(). No se espera a activeVerb/cmdId: el router no los conserva para este verbo
+    # (command_spec, conserva_plano).
+    if self._flag_desde is None:
+      self._flag_desde = now_mono
+    abierta = autoridad is not None and autoridad.window_open(now_mono)
+    if not abierta and (now_mono - self._flag_desde) < ESPERA_PLANO_S:
+      return ""
+    self._flag_desde = None
 
     # Se consume SIEMPRE, se ejecute o no: un flag que sobrevive a un rechazo es una
     # orden que se ejecuta sola en cuanto los gates se ponen verdes un rato despues,
@@ -97,9 +126,33 @@ class OrbitSpeedUltraSimple:
     orbit_speed_increase = False
     orbit_speed_decrease = False
 
+    self._detalle = ""
     motivo = self._evaluar(car_control, car_state, v_cruise_helper, autoridad, now_mono, subir)
     self._ultimo_motivo = motivo
     return motivo
+
+  def veredicto(self, motivo: str, now_mono: float) -> dict:
+    """Resultado REAL de la ultima orden decidida, para OrbitCmdResult.
+
+    Misma forma que el de desire_helper. `applied` solo si la consigna se movio de verdad;
+    cualquier otro motivo es `rejected`, que el router publica como `failed` porque ya habia
+    anunciado `executing`. Solo tipos nativos: card lo serializa y lo escribe con put().
+
+    Va SIN id: el router lo correlaciona por verbo con el cruise_delta pendiente mas
+    antiguo, que es el de este flag (la app no manda otra pulsacion hasta cerrar esta).
+    La app compara `detail` con estos textos (presupuesto / limite / el de por defecto):
+    cambiarlos es cambiar lo que lee el conductor.
+    """
+    return {
+      "v": CONTRACT_VERSION,
+      "verb": VERB,
+      "id": "",
+      "phase": Phase.APPLIED if motivo == "OK" else Phase.REJECTED,
+      "reason": motivo,
+      "detail": self._detalle or "precondicion en rojo al aplicar",
+      "ts_ms": ahora_epoch_ms(),
+      "mono_ms": int(now_mono * 1000),
+    }
 
   def _evaluar(self, car_control, car_state, v_cruise_helper, autoridad, now_mono, subir) -> str:
     if autoridad is None:
@@ -133,6 +186,7 @@ class OrbitSpeedUltraSimple:
     incremento = self.get_speed_increment()
     restante = self._presupuesto_restante(now_mono)
     if restante <= 0.0:
+      self._detalle = f"presupuesto de {PRESUPUESTO_KPH:g} km/h por minuto agotado"
       return "RANGE"
     incremento = min(incremento, restante)
 
@@ -142,12 +196,14 @@ class OrbitSpeedUltraSimple:
 
     gastado = abs(nueva - actual)
     if gastado <= 0.0:
+      self._detalle = f"la consigna ya esta en el limite ({actual:g} km/h)"
       return "RANGE"  # ya estaba en el tope: no hay cambio que aplicar
 
     v_cruise_helper.v_cruise_kph = nueva
     v_cruise_helper.v_cruise_cluster_kph = nueva
     self._gasto.append((now_mono, gastado))
     self.last_speed_command = now_mono
+    self._detalle = f"consigna {actual:g} -> {nueva:g} km/h"
     return "OK"
 
 
