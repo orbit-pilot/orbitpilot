@@ -9,7 +9,7 @@ from typing import Optional, Dict
 import paho.mqtt.client as mqtt
 
 from openpilot.common.params import Params
-from openpilot.orbit import config_broker
+from openpilot.orbit import config_broker, telemetria_grupos as grupos
 
 try:
   from openpilot.common.swaglog import cloudlog
@@ -338,6 +338,11 @@ def send_event_full(title: str,
       alert_type = event_name
     else:
       alert_type = "unknown/unknown"
+
+  # Submenu ORBIT > Telemetria: con el grupo "Eventos" apagado no se publica. Devuelve True
+  # (atendido) y no False, o mirror_alerts lo reintentaria en cada ciclo de selfdrived.
+  if not grupos.activo(Params(), grupos.param_v2("event")):
+    return True
 
   client = _ensure_mqtt_client()
 

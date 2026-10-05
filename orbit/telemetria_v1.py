@@ -954,6 +954,10 @@ class MotorTelemetria:
     # cuando el diagnostico caduca solo. Sin esto la UI seguiria diciendo "diagnostico"
     # mientras el dispositivo ya emite en normal.
     self.diag_expirado = False
+    # Degradar a AHORRO cuando deviceState.networkMetered (seccion 7). True de fabrica para el
+    # motor suelto; el emisor lo fija desde el Param OrbitAhorroRedMovil, que esta APAGADO por
+    # defecto (telemetria_grupos.ahorro_movil_activo): ver por que alli.
+    self.degradar_por_red = True
 
     self._seq = dict.fromkeys(CANALES, 0)
     self._ultimo_envio: dict[str, float] = {}
@@ -994,7 +998,7 @@ class MotorTelemetria:
       self.perfil_pedido = PERFIL_NORMAL
       self._diag_desde = None
       self.diag_expirado = True
-    return degrada_por_red(self.perfil_pedido, metered)
+    return degrada_por_red(self.perfil_pedido, metered and self.degradar_por_red)
 
   # ------------------------------------------------------------------ utilidades internas
 

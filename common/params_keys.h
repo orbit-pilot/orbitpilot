@@ -364,6 +364,19 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"gpsLocation_toggle", {PERSISTENT, BOOL}},
     {"drivingModelData_toggle", {PERSISTENT, BOOL}},
     {"radarState_toggle", {PERSISTENT, BOOL}},
+    // Submenu ORBIT > Telemetria (orbit/telemetria_grupos.py): interruptor por canal v2. Sin configurar = encendido; solo
+    // se apaga con un False EXPLICITO. Los canales v1 reutilizan los <canal>_toggle de arriba.
+    {"tel2_pos_toggle", {PERSISTENT, BOOL}},
+    {"tel2_vehicle_toggle", {PERSISTENT, BOOL}},
+    {"tel2_perception_toggle", {PERSISTENT, BOOL}},
+    {"tel2_openpilot_toggle", {PERSISTENT, BOOL}},
+    {"tel2_road_toggle", {PERSISTENT, BOOL}},
+    {"tel2_health_toggle", {PERSISTENT, BOOL}},
+    {"tel2_event_toggle", {PERSISTENT, BOOL}},
+    {"tel2_trip_toggle", {PERSISTENT, BOOL}},
+    // Degradar a perfil AHORRO cuando la red movil esta marcada como de pago (GsmMetered). Sin configurar = APAGADO: GsmMetered
+    // vale "1" de fabrica y con esto encendido todo comma con SIM perdia percepcion, alertas y pedales al salir de casa.
+    {"OrbitAhorroRedMovil", {PERSISTENT, BOOL}},
     // Navegación (distancias de maniobra) + sender UEM
     {"roundabout_distance", {PERSISTENT, STRING}},
     {"intersection_distance", {PERSISTENT, STRING}},

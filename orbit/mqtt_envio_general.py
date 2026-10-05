@@ -16,6 +16,7 @@ from .command_state import get_command_plane
 from . import telemetria_v1 as tel2
 from . import spool as spool_mod
 from . import config_v2 as cfg2
+from . import telemetria_grupos as grupos
 
 
 # Namespaces MQTT de presencia. v1 (telemetry_mqtt/...) es LEGACY: es el que
@@ -1026,7 +1027,13 @@ class MQTTEnvioGeneral:
     ahora = time.monotonic()
     if (ahora - self._last_v1) >= self.velocidadActualizacion:
       self._last_v1 = ahora
-      self._ciclo_v1()
+      # El camino v1 va AISLADO del v2: una excepcion persistente en v1 (un campo que ya no
+      # existe tras un rebase, un Param roto) salia de _loop_once antes de _ciclo_v2 y dejaba
+      # TODA la telemetria v2 muda, con una linea de log por segundo como unico rastro.
+      try:
+        self._ciclo_v1()
+      except Exception:
+        cloudlog.exception("[Bemposta] ciclo v1 fallo; la telemetria v2 sigue")
     self._ciclo_v2(ahora)
     time.sleep(self.TICK_SECS)
 
@@ -1355,6 +1362,11 @@ class MQTTEnvioGeneral:
 
   _PRIVACY_TTL_S = 1.0
   PARAM_PERFIL = "OrbitTelemetryProfile"
+  # Canales v2 apagados desde el submenu Telemetria (telemetria_grupos) y el instante de la
+  # ultima lectura. Defectos de CLASE: asi un emisor construido sin __init__ (las pruebas) o
+  # antes de la primera lectura parte de "todo encendido".
+  _tel2_ts = float("-inf")
+  _tel2_apagados = frozenset()
 
   def _privacidad_silenciada(self) -> bool:
     """Interruptor maestro LOCAL de privacidad (OrbitPrivacyMute).
@@ -1386,6 +1398,15 @@ class MQTTEnvioGeneral:
         self._privacy_cache = False
     return self._privacy_cache
 
+  def _canales_v2_apagados(self) -> frozenset:
+    """Canales v2 apagados en el submenu Telemetria. Lectura cacheada 1 s: hace efecto en
+    caliente sin abrir un Param por canal en cada tick de 4 Hz."""
+    ahora = time.monotonic()
+    if ahora - self._tel2_ts >= self._PRIVACY_TTL_S:
+      self._tel2_ts = ahora
+      self._tel2_apagados = grupos.canales_v2_apagados(self.params)
+    return self._tel2_apagados
+
   def _maybe_reload_perfil(self, ahora):
     """Relee el perfil de telemetria pedido (AHORRO / NORMAL / DIAGNOSTICO, seccion 7).
 
@@ -1400,6 +1421,8 @@ class MQTTEnvioGeneral:
     if (ahora - self._last_perfil_check) < self.PERFIL_RELOAD_SECS:
       return
     self._last_perfil_check = ahora
+    # Ahorro automatico en red de pago: opt-in (ver telemetria_grupos.ahorro_movil_activo).
+    self.motor_v2.degradar_por_red = grupos.ahorro_movil_activo(self.params)
     try:
       pedido = self.params.get(self.PARAM_PERFIL)
     except Exception:
@@ -1957,6 +1980,18 @@ class MQTTEnvioGeneral:
     except Exception:
       cloudlog.exception("[Bemposta] motor de telemetria v2 fallo")
       return
+    apagados = self._canales_v2_apagados()
+    if apagados:
+      # Canal apagado desde el menu: no sale ni se encola. Un canal on-change ya selló su
+      # estado dentro del tick, asi que se deshace (`revertir`) para que vuelva a salir en
+      # cuanto se reactive y no se calle hasta el keepalive (road: 600 s en normal).
+      salientes = []
+      for canal, cuerpo in mensajes:
+        if canal in apagados:
+          self.motor_v2.revertir(canal)
+        else:
+          salientes.append((canal, cuerpo))
+      mensajes = salientes
     if self._privacidad_silenciada():
       # Segunda mitad del interruptor en la CAPTURA. _fuentes_v2 ya deja sin fuente a `pos`
       # y a `road`; `trip` no tiene fuente que quitar porque se alimenta de carState, asi
