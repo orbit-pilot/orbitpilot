@@ -13,7 +13,8 @@ grande (sunnypilot/layouts/settings/orbit_panel.py), en baldosas mici.
     CONEXION (servidor, enlace, cuenta con su rol),
   * modo banco, "que significa esto", selector de volante,
   * vincular con la app (QR) / cuenta + desvincular, IP del servidor y prueba,
-  * interruptor maestro de privacidad, ajustes avanzados y valores seguros.
+  * interruptor maestro de privacidad, telemetria (que grupos de datos se envian a la app),
+    ajustes avanzados y valores seguros.
 
 La logica (textos, validaciones, escrituras) es la de orbit_ajustes / orbit_mando /
 orbit_server: la misma que usa el comma 3X. Aqui solo hay baldosas. Params se leen a
@@ -29,6 +30,7 @@ from openpilot.orbit import config_broker
 from openpilot.selfdrive.ui import orbit_theme as t
 from openpilot.selfdrive.ui.mici.widgets.button import BigToggle
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.orbit_avanzado import AvanzadoLayoutMici
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.orbit_telemetria import TelemetriaLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.orbit_volante import VolanteLayoutMici, estado_volante, nombre_modo
 from openpilot.selfdrive.ui.sunnypilot.mici.widgets.orbit_enroll_dialog import OrbitEnrollDialogMici
 from openpilot.selfdrive.ui.sunnypilot.mici.widgets.orbit_widgets import (
@@ -110,6 +112,10 @@ class OrbitLayoutMici(NavScroller):
     self._tgl_privacidad = BigToggle("no emitir", "posición ni cámara", initial_state=mando.privacy_muted(),
                                      toggle_callback=self._on_privacidad)
 
+    self._telemetria = TelemetriaLayoutMici()
+    self._btn_telemetria = Baldosa("telemetría", "qué se envía a la app")
+    self._btn_telemetria.set_click_callback(lambda: gui_app.push_widget(self._telemetria))
+
     self._avanzado = AvanzadoLayoutMici()
     self._btn_avanzado = Baldosa("ajustes avanzados", "hud y jetson")
     self._btn_avanzado.set_click_callback(lambda: gui_app.push_widget(self._avanzado))
@@ -131,6 +137,7 @@ class OrbitLayoutMici(NavScroller):
       self._btn_servidor,
       self._btn_probar,
       self._tgl_privacidad,
+      self._btn_telemetria,
       self._btn_avanzado,
       self._btn_seguros,
     ])

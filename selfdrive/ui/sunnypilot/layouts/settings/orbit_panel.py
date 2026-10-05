@@ -16,9 +16,11 @@ el coche o lo que tiene que funcionar con la red caida.
   * selector de modo de volante con confirmacion,
   * interruptor maestro LOCAL de privacidad,
   * QR de enrolamiento e IP del broker,
+  * submenu Telemetria: que grupos de datos manda el dispositivo a la app,
   * "Restablecer valores seguros".
 
-Se fue a la app: los canales de telemetria (8 toggles) y la configuracion de camara.
+Se fue a la app: la configuracion de camara. Los canales de telemetria sueltos (8 toggles)
+tambien se fueron; vuelven agrupados (posicion, vehiculo...) en el submenu Telemetria.
 Se borro: la seccion PRUEBAS (modo_debug) junto con el overlay que consumia modo_debug.
 
 EL ESTADO DEL MANDO SE LEE DE CEREAL, NO DE PARAMS. `ui_state.orbit_command` es la
@@ -49,6 +51,7 @@ from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.orbit_sub_layouts.advanced_settings import AdvancedSettingsLayout
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.orbit_sub_layouts.server_settings import ServerRows
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.orbit_sub_layouts.steer_mode import SteerModeRows
+from openpilot.selfdrive.ui.sunnypilot.layouts.settings.orbit_sub_layouts.telemetry_settings import TelemetrySettingsLayout
 
 _REFRESH_SECONDS = 1.0
 
@@ -123,6 +126,7 @@ def ayuda_html() -> str:
 class PanelType(IntEnum):
   MAIN = 0
   ADVANCED = 1
+  TELEMETRY = 2
 
 
 class _MandoCard(Widget):
@@ -298,6 +302,7 @@ class OrbitLayout(Widget):
 
     self._current_panel = PanelType.MAIN
     self._advanced_layout = AdvancedSettingsLayout(lambda: self._set_current_panel(PanelType.MAIN))
+    self._telemetry_layout = TelemetrySettingsLayout(lambda: self._set_current_panel(PanelType.MAIN))
 
     self._monitor = ServerMonitor()
     self._server_rows = ServerRows()
@@ -357,6 +362,14 @@ class OrbitLayout(Widget):
       callback=lambda: gui_app.push_widget(OrbitEnrollDialog()),
     )
 
+    self._telemetry_button = button_item_sp(
+      title=lambda: tr("Telemetria"),
+      button_text=lambda: tr("ABRIR"),
+      description=lambda: tr("Que datos manda el dispositivo a la app: posicion, vehiculo, percepcion... " +
+                             "y el ahorro automatico en red movil."),
+      callback=lambda: self._set_current_panel(PanelType.TELEMETRY),
+    )
+
     self._advanced_button = button_item_sp(
       title=lambda: tr("Ajustes avanzados"),
       button_text=lambda: tr("ABRIR"),
@@ -388,6 +401,7 @@ class OrbitLayout(Widget):
       self._server_rows.items[0],
       SectionHeaderSP(tr("DISPOSITIVO"), seccion='mando'),
       self._privacy_toggle,
+      self._telemetry_button,
       self._advanced_button,
       self._safe_reset_button,
     ]
@@ -513,10 +527,16 @@ class OrbitLayout(Widget):
   # -------------------------------------------------------------------- lifecycle
   def _set_current_panel(self, panel: PanelType):
     self._current_panel = panel
+    if panel == PanelType.TELEMETRY:
+      # Relee los toggles al abrir: la app o el interruptor de privacidad pudieron cambiarlos.
+      self._telemetry_layout.show_event()
 
   def _render(self, rect):
     if self._current_panel == PanelType.ADVANCED:
       self._advanced_layout.render(rect)
+      return
+    if self._current_panel == PanelType.TELEMETRY:
+      self._telemetry_layout.render(rect)
       return
 
     self._refresh_status()

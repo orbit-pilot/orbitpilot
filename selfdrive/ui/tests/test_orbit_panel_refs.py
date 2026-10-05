@@ -106,7 +106,22 @@ def test_uso_del_bench_guard_existe():
   assert not rotas, "la UI usa miembros que BenchGuard NO tiene:\n" + "\n".join(rotas)
 
 
+def test_las_pantallas_de_telemetria_estan_vigiladas():
+  """Las dos pantallas del submenu Telemetria deshabilitan la posicion con `mando.privacy_muted()`.
+
+  Si una dejara de importar orbit_mando con alias (o cambiara el alias), el test de arriba
+  dejaria de comprobar sus referencias sin avisar, y un nombre roto saldria en el coche:
+  AttributeError en el render -> muere el proceso `ui`."""
+  esperadas = {UI_DIR / "sunnypilot" / "layouts" / "settings" / "orbit_sub_layouts" / "telemetry_settings.py",
+               UI_DIR / "sunnypilot" / "mici" / "layouts" / "orbit_telemetria.py"}
+  vigiladas = {p for p in _ficheros_ui() if _alias_de_mando(_leer(p))}
+  assert esperadas <= vigiladas, f"sin vigilar: {sorted(str(p.relative_to(UI_DIR)) for p in esperadas - vigiladas)}"
+  for path in esperadas:
+    assert any(attr == "privacy_muted" for _, attr in _referencias(_leer(path), _alias_de_mando(_leer(path))))
+
+
 if __name__ == "__main__":
   test_referencias_a_orbit_mando_existen()
   test_uso_del_bench_guard_existe()
+  test_las_pantallas_de_telemetria_estan_vigiladas()
   print("OK")

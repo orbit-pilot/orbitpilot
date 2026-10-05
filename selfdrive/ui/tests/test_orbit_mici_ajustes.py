@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openpilot.orbit import telemetria_grupos as tg
 from openpilot.selfdrive.ui.widgets import orbit_ajustes as aj
 from openpilot.selfdrive.ui.widgets import orbit_mando as mando
 
@@ -183,6 +184,101 @@ def test_valores_seguros_un_fallo_no_para_el_resto(monkeypatch):
   assert p.d["sic_adelantar"] is False and p.d["brutebreak_active"] is False
 
 
+# --------------------------------------------------------------------------- telemetria
+GRUPO = {g.clave: g for g in tg.GRUPOS}
+
+
+def test_telemetria_sin_configurar_esta_todo_encendido_y_nada_bloqueado():
+  # El _Params falso, como el real, lee un param sin configurar como False con get_bool: el
+  # helper no puede usarlo o pintaria OFF mientras el canal emite.
+  p = _Params()
+  assert all(aj.encendido_grupo(p, g, False) for g in tg.GRUPOS)
+  assert not any(aj.grupo_bloqueado(g, False) for g in tg.GRUPOS)
+  assert all(aj.descripcion_grupo(g, False) == g.descripcion for g in tg.GRUPOS)
+
+
+def test_telemetria_un_solo_canal_apagado_apaga_el_grupo():
+  # La app puede apagar un canal v1 suelto por cfg/desired: el grupo no se pinta "todo encendido".
+  p = _Params({"carControl_toggle": False})
+  assert not aj.encendido_grupo(p, GRUPO["vehiculo"], False)
+  assert aj.encendido_grupo(p, GRUPO["percepcion"], False)
+  assert not aj.encendido_grupo(_Params({"tel2_trip_toggle": False}), GRUPO["eventos"], False)
+
+
+def test_telemetria_posicion_con_la_privacidad_puesta():
+  p = _Params()
+  pos = GRUPO["posicion"]
+  assert aj.grupo_bloqueado(pos, True)
+  assert not aj.encendido_grupo(p, pos, True)   # no se pinta ON lo que la privacidad esta cortando
+  texto = aj.descripcion_grupo(pos, True)
+  assert "privacidad" in texto and texto != pos.descripcion
+  # Solo la posicion: el resto sigue editable y con su texto.
+  resto = [g for g in tg.GRUPOS if not g.posicion]
+  assert resto and not any(aj.grupo_bloqueado(g, True) for g in resto)
+  assert all(aj.descripcion_grupo(g, True) == g.descripcion for g in resto)
+
+
+def test_telemetria_cambiar_grupo_escribe_todos_sus_params():
+  p = _Params()
+  for g in tg.GRUPOS:
+    assert aj.cambiar_grupo(p, g, False, False) == []
+    assert not aj.encendido_grupo(p, g, False)
+    assert all(p.d[k] is False for k in tg.params_de(g))
+    assert aj.cambiar_grupo(p, g, True, False) == []
+    assert aj.encendido_grupo(p, g, False)
+    assert all(p.d[k] is True for k in tg.params_de(g))
+
+
+def test_telemetria_cambiar_posicion_con_privacidad_no_escribe_nada():
+  # Cinturon: la fila ya sale deshabilitada, pero encender aqui anularia el interruptor.
+  p = _Params()
+  assert aj.cambiar_grupo(p, GRUPO["posicion"], True, True) == [] and p.escrituras == []
+
+
+def test_telemetria_cambiar_grupo_devuelve_los_que_fallan_y_escribe_el_resto():
+  p = _Params(rotas={"tel2_vehicle_toggle"})
+  assert aj.cambiar_grupo(p, GRUPO["vehiculo"], False, False) == ["tel2_vehicle_toggle"]
+  assert p.d["carState_toggle"] is False and p.d["carControl_toggle"] is False
+
+
+def test_ahorro_movil_apagado_por_defecto_y_se_escribe():
+  p = _Params()
+  assert not tg.ahorro_movil_activo(p)
+  assert aj.cambiar_ahorro_movil(p, True) == [] and tg.ahorro_movil_activo(p)
+  assert aj.cambiar_ahorro_movil(p, False) == [] and not tg.ahorro_movil_activo(p)
+  assert aj.cambiar_ahorro_movil(_Params(rotas={tg.PARAM_AHORRO_MOVIL}), True) == [tg.PARAM_AHORRO_MOVIL]
+  texto = aj.texto_ahorro_movil()
+  assert "AHORRO" in texto and "pedales" in texto
+
+
+# --------------------------------------------------------------------------- privacidad
+@pytest.fixture
+def privacidad(params, monkeypatch, tmp_path):
+  """set_privacy_mute con todo su estado en tmp_path: nada toca /data ni orbit/config_jetson.json."""
+  monkeypatch.setattr(mando, "PRIVACY_STATE_FILE", str(tmp_path / "orbit_privacy.json"))
+  monkeypatch.setattr(mando, "CAMERA_CONFIG_FILE", str(tmp_path / "orbit_camera_config.json"))
+  monkeypatch.setattr(mando, "_jetson_config_path", lambda: str(tmp_path / "config_jetson.json"))
+  return params
+
+
+def test_quitar_la_privacidad_deja_encendido_el_gps_que_nunca_se_configuro(privacidad):
+  p = privacidad
+  assert "gpsLocation_toggle" not in p.d and "gpsLocationExternal_toggle" not in p.d
+  assert mando.set_privacy_mute(True) == [] and mando.privacy_muted()
+  assert p.d["gpsLocation_toggle"] is False and p.d["gpsLocationExternal_toggle"] is False
+  # Silenciar dos veces no puede guardar el False del primer silencio como "lo de antes".
+  assert mando.set_privacy_mute(True) == []
+  assert mando.set_privacy_mute(False) == [] and not mando.privacy_muted()
+  assert p.d["gpsLocation_toggle"] is True and p.d["gpsLocationExternal_toggle"] is True
+
+
+def test_quitar_la_privacidad_respeta_el_gps_apagado_a_proposito(privacidad):
+  p = privacidad
+  p.d["gpsLocation_toggle"] = False
+  assert mando.set_privacy_mute(True) == [] and mando.set_privacy_mute(False) == []
+  assert p.d["gpsLocation_toggle"] is False            # lo apago el usuario: se queda asi
+  assert p.d["gpsLocationExternal_toggle"] is True     # este nunca se configuro: encendido
+
 # --------------------------------------------------------------------------- jetson
 def test_config_jetson_guardar_y_cargar(tmp_path, params):
   ruta = str(tmp_path / "sub" / "config_jetson.json")
@@ -237,6 +333,11 @@ def test_la_ui_grande_usa_la_logica_compartida():
     "sunnypilot/mici/layouts/orbit.py": ["aplicar_valores_seguros", "lineas_mando", "etiqueta_cuenta", "validar_host"],
     "sunnypilot/mici/layouts/orbit_volante.py": ["aplicar_modo_volante", "confirmacion_modo", "fijar_objetivo_esquive"],
     "sunnypilot/mici/layouts/orbit_avanzado.py": ["guardar_config_jetson", "parsear_campo"],
+    # El submenu Telemetria: las dos pantallas leen, bloquean y escriben por los mismos helpers.
+    "sunnypilot/layouts/settings/orbit_sub_layouts/telemetry_settings.py": [
+      "encendido_grupo", "grupo_bloqueado", "descripcion_grupo", "cambiar_grupo", "cambiar_ahorro_movil", "texto_ahorro_movil"],
+    "sunnypilot/mici/layouts/orbit_telemetria.py": [
+      "encendido_grupo", "grupo_bloqueado", "descripcion_grupo", "cambiar_grupo", "cambiar_ahorro_movil", "texto_ahorro_movil"],
   }
   for fichero, funciones in usos.items():
     nombres = {n.attr for n in ast.walk(ast.parse((UI_DIR / fichero).read_text())) if isinstance(n, ast.Attribute)}

@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.swaglog import cloudlog
+from openpilot.orbit import telemetria_grupos as grupos
 from openpilot.selfdrive.ui.widgets import orbit_mando as mando
 from openpilot.system.ui.lib.multilang import tr
 
@@ -364,6 +365,55 @@ def fijar_objetivo_esquive(params, objetivo: str) -> None:
       "ts": str(_ahora_ms()),
     }
     params.put("JetsonObstacleApplyTargetMqttPayload", json.dumps(payload))
+
+
+# ======================================================================== telemetria
+# Submenu ORBIT > Telemetria: que grupos de datos manda el dispositivo a la app (modelo en
+# orbit/telemetria_grupos.py). `silenciado` es `mando.privacy_muted()`: lo lee la pantalla
+# una vez por refresco y se pasa a mano para que estos helpers no abran ficheros.
+
+def grupo_bloqueado(grupo, silenciado: bool) -> bool:
+  """La posicion no se toca con el interruptor de privacidad puesto: ya la esta cortando el."""
+  return bool(grupo.posicion and silenciado)
+
+
+def encendido_grupo(params, grupo, silenciado: bool) -> bool:
+  """Estado del interruptor del grupo. NUNCA `get_bool`: lee "sin configurar" como OFF.
+
+  Con la privacidad puesta la posicion se pinta OFF aunque su toggle diga otra cosa: el
+  interruptor de privacidad es quien manda y pintarla ON seria mentir."""
+  return grupos.grupo_activo(params, grupo) and not grupo_bloqueado(grupo, silenciado)
+
+
+def descripcion_grupo(grupo, silenciado: bool) -> str:
+  if grupo_bloqueado(grupo, silenciado):
+    return tr("Apagada: el interruptor de privacidad esta puesto. Quitalo para poder activarla.")
+  return tr(grupo.descripcion)
+
+
+def cambiar_grupo(params, grupo, encendido: bool, silenciado: bool) -> list[str]:
+  """Escribe el grupo entero (v1 y v2). Devuelve los params que fallaron.
+
+  La posicion con la privacidad puesta no se escribe: la fila ya sale deshabilitada, esto
+  es el cinturon (encenderla aqui dejaria gpsLocation_toggle a True bajo el mute)."""
+  if grupo_bloqueado(grupo, silenciado):
+    return []
+  return grupos.fijar_grupo(params, grupo, encendido)
+
+
+def texto_ahorro_movil() -> str:
+  return tr("Si la red movil esta marcada como de pago, baja al perfil AHORRO y deja de enviar " +
+            "percepcion, alertas, marcha y pedales. Apagado por defecto.")
+
+
+def cambiar_ahorro_movil(params, encendido: bool) -> list[str]:
+  """Escribe OrbitAhorroRedMovil (bloqueante: la pantalla relee justo despues). Devuelve los fallos."""
+  try:
+    params.put_bool(grupos.PARAM_AHORRO_MOVIL, bool(encendido), True)
+  except Exception:
+    cloudlog.exception("[Orbit/UI] telemetria: fallo el ahorro en red movil")
+    return [grupos.PARAM_AHORRO_MOVIL]
+  return []
 
 
 # ======================================================================== valores seguros

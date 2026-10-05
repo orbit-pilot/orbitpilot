@@ -34,6 +34,7 @@ import time
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.swaglog import cloudlog
+from openpilot.orbit import telemetria_grupos as grupos
 
 # --------------------------------------------------------------------------- params
 # Registrados en common/params_keys.h. Los cuatro del mando son
@@ -643,7 +644,10 @@ def set_privacy_mute(on: bool) -> list[str]:
       restore = dict(restore)
       for key in POSITION_CHANNEL_PARAMS:
         try:
-          restore[key] = bool(p.get_bool(key)) if p is not None else True
+          # `activo`, no get_bool: un toggle SIN CONFIGURAR (None) esta encendido, pero
+          # get_bool lo lee como False. Guardar ese False dejaba el GPS v1 apagado para
+          # siempre al quitar el mute, mientras el v2 volvia a emitir.
+          restore[key] = grupos.activo(p, key) if p is not None else True
         except Exception:
           restore[key] = True
   for key in POSITION_CHANNEL_PARAMS:
